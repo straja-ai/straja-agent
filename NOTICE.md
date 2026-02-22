@@ -12,7 +12,7 @@ direct host filesystem or native process access.
 The original OpenClaw code is licensed under the MIT License.
 See the [LICENSE](./LICENSE) file for the full text.
 
-Modifications copyright (c) 2025-2026 Straja contributors.
+Modifications copyright (c) 2025-2026 Sorin Manole.
 All modifications are also released under the MIT License.
 
 ## Key Architectural Differences from Upstream

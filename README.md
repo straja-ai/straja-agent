@@ -105,4 +105,4 @@ Microsoft Teams, Matrix, Zalo, WebChat, and more via extensions.
 MIT License. See [LICENSE](./LICENSE).
 
 Original work copyright (c) 2025 Peter Steinberger.
-Modifications copyright (c) 2025-2026 Straja contributors.
+Modifications copyright (c) 2025-2026 Sorin Manole.
