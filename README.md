@@ -126,5 +126,4 @@ pnpm gateway:watch
 
 MIT License. See [LICENSE](./LICENSE).
 
-Original work copyright (c) 2025 Peter Steinberger.
-Modifications copyright (c) 2025-2026 Sorin Manole.
+Contact: hello@straja.ai
