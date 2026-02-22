@@ -1,6 +1,5 @@
-import fs from "node:fs";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
@@ -36,6 +35,7 @@ import {
   capArrayByJsonBytes,
   loadSessionEntry,
   readSessionMessages,
+  readVaultSessionContent,
   resolveSessionModelRef,
 } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
@@ -283,35 +283,17 @@ function resolveTranscriptPath(params: {
   }
 }
 
-function ensureTranscriptFile(params: { transcriptPath: string; sessionId: string }): {
-  ok: boolean;
-  error?: string;
-} {
-  if (fs.existsSync(params.transcriptPath)) {
-    return { ok: true };
-  }
-  try {
-    fs.mkdirSync(path.dirname(params.transcriptPath), { recursive: true });
-    const header = {
-      type: "session",
-      version: CURRENT_SESSION_VERSION,
-      id: params.sessionId,
-      timestamp: new Date().toISOString(),
-      cwd: process.cwd(),
-    };
-    fs.writeFileSync(params.transcriptPath, `${JSON.stringify(header)}\n`, {
-      encoding: "utf-8",
-      mode: 0o600,
-    });
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
+// ensureTranscriptFile removed — sessions are vault-backed, no disk transcripts.
 
 function transcriptHasIdempotencyKey(transcriptPath: string, idempotencyKey: string): boolean {
   try {
-    const lines = fs.readFileSync(transcriptPath, "utf-8").split(/\r?\n/);
+    // Read from vault using the transcript path as the candidate
+    const content = readVaultSessionContent([transcriptPath]);
+    if (!content) {
+      return false;
+    }
+
+    const lines = content.split(/\r?\n/);
     for (const line of lines) {
       if (!line.trim()) {
         continue;
@@ -352,18 +334,9 @@ function appendAssistantTranscriptMessage(params: {
     return { ok: false, error: "transcript path not resolved" };
   }
 
-  if (!fs.existsSync(transcriptPath)) {
-    if (!params.createIfMissing) {
-      return { ok: false, error: "transcript file not found" };
-    }
-    const ensured = ensureTranscriptFile({
-      transcriptPath,
-      sessionId: params.sessionId,
-    });
-    if (!ensured.ok) {
-      return { ok: false, error: ensured.error ?? "failed to create transcript file" };
-    }
-  }
+  // Session existence is checked via vault (not disk).
+  // SessionManager.open() uses our patched setSessionFile which reads from vault.
+  // For createIfMissing, SessionManager handles creating a new session in vault.
 
   if (params.idempotencyKey && transcriptHasIdempotencyKey(transcriptPath, params.idempotencyKey)) {
     return { ok: true };

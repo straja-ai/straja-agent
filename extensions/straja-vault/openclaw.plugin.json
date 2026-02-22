@@ -1,0 +1,37 @@
+{
+  "id": "straja-vault",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "default": "http://localhost:8181"
+      },
+      "injectMemoryInPrompt": {
+        "type": "boolean",
+        "default": false
+      },
+      "debugLogPrompt": {
+        "type": "boolean",
+        "default": false
+      }
+    }
+  },
+  "uiHints": {
+    "baseUrl": {
+      "label": "Vault URL",
+      "help": "Base URL of the Straja Vault HTTP daemon",
+      "placeholder": "http://localhost:8181"
+    },
+    "injectMemoryInPrompt": {
+      "label": "Inject Memory in Prompt",
+      "help": "Inject MEMORY.md content into every LLM prompt. Useful for smaller models that don't proactively call vault_memory_search. Default: off."
+    },
+    "debugLogPrompt": {
+      "label": "Debug: Log LLM Prompt",
+      "help": "Save the full LLM prompt (system + history + user message) to vault on each turn. View at /raw/_workspace/_debug/last-prompt.json"
+    }
+  }
+}

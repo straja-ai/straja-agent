@@ -45,7 +45,9 @@ export {
   readSessionTitleFieldsFromTranscript,
   readSessionPreviewItemsFromTranscript,
   readSessionMessages,
+  readVaultSessionContent,
   resolveSessionTranscriptCandidates,
+  vaultWriteSessionContent,
 } from "./session-utils.fs.js";
 export type {
   GatewayAgentRow,

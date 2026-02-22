@@ -4,6 +4,29 @@ import { ensureAuthProfileStore } from "./auth-profiles.js";
 import type { AuthProfileCredential } from "./auth-profiles/types.js";
 import { normalizeProviderId } from "./model-selection.js";
 
+// ---------------------------------------------------------------------------
+// Vault I/O bridge
+// ---------------------------------------------------------------------------
+
+/** Well-known Symbol for the gateway workspace patch (vault-backed file ops). */
+const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
+
+/** Vault key for auth.json — stored under _config/ in the _workspace collection. */
+const AUTH_JSON_VAULT_KEY = "_config/auth.json";
+
+type VaultWorkspaceOps = {
+  readFile(filename: string): Promise<string | null>;
+  writeFile(filename: string, content: string): Promise<void>;
+};
+
+function resolveVaultWorkspaceOps(): VaultWorkspaceOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY] as (() => VaultWorkspaceOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 type AuthJsonCredential =
   | {
       type: "api_key";
@@ -20,6 +43,25 @@ type AuthJsonCredential =
 type AuthJsonShape = Record<string, AuthJsonCredential>;
 
 async function readAuthJson(filePath: string): Promise<AuthJsonShape> {
+  // Vault mode: read from vault _workspace collection
+  const vaultOps = resolveVaultWorkspaceOps();
+  if (vaultOps) {
+    try {
+      const raw = await vaultOps.readFile(AUTH_JSON_VAULT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object") {
+          return parsed as AuthJsonShape;
+        }
+      }
+      return {};
+    } catch {
+      // Vault unreachable — no fallback to disk
+      return {};
+    }
+  }
+
+  // No vault (shouldn't happen in production)
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw) as unknown;
@@ -151,8 +193,18 @@ export async function ensurePiAuthJsonFromAuthProfiles(agentDir: string): Promis
     return { wrote: false, authPath };
   }
 
+  const payload = `${JSON.stringify(existing, null, 2)}\n`;
+
+  // Vault mode: write to vault _workspace collection
+  const vaultOps = resolveVaultWorkspaceOps();
+  if (vaultOps) {
+    await vaultOps.writeFile(AUTH_JSON_VAULT_KEY, payload);
+    return { wrote: true, authPath };
+  }
+
+  // No vault (shouldn't happen in production)
   await fs.mkdir(agentDir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(authPath, `${JSON.stringify(existing, null, 2)}\n`, { mode: 0o600 });
+  await fs.writeFile(authPath, payload, { mode: 0o600 });
 
   return { wrote: true, authPath };
 }

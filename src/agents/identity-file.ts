@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { DEFAULT_IDENTITY_FILENAME } from "./workspace.js";
 
@@ -88,17 +88,92 @@ export function identityHasValues(identity: AgentIdentityFile): boolean {
   );
 }
 
-export function loadIdentityFromFile(identityPath: string): AgentIdentityFile | null {
-  try {
-    const content = fs.readFileSync(identityPath, "utf-8");
-    const parsed = parseIdentityMarkdown(content);
-    if (!identityHasValues(parsed)) {
-      return null;
-    }
-    return parsed;
-  } catch {
+// ---------------------------------------------------------------------------
+// Vault-backed synchronous file reader
+// ---------------------------------------------------------------------------
+
+/** Well-known Symbol for the gateway workspace patch (vault-backed file ops). */
+const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
+
+/**
+ * Synchronous HTTP GET via curl to the vault.
+ *
+ * Same pattern as session-patch.ts — needed because callers of
+ * loadIdentityFromFile() and loadAgentIdentityFromWorkspace() are
+ * synchronous (agents.config.ts, identity-avatar.ts).
+ */
+function syncVaultRead(filename: string): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY] as (() => { readFile: unknown }) | undefined;
+  if (!factory) {
     return null;
   }
+
+  // Resolve base URL from the vault reader key (also set by session-patch)
+  const baseUrl = g[Symbol.for("openclaw.vaultReaderBaseUrl")] as string | undefined;
+  if (!baseUrl) {
+    return null;
+  }
+
+  const url = `${baseUrl}/raw/_workspace/${encodeURIComponent(filename)}`;
+
+  try {
+    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", url], {
+      encoding: "utf-8",
+      timeout: 5_000,
+      maxBuffer: 5 * 1024 * 1024,
+    });
+
+    const lines = result.trimEnd().split("\n");
+    const statusLine = lines.pop() || "0";
+    const status = parseInt(statusLine, 10);
+    const body = lines.join("\n");
+
+    if (status === 200 && body.trim()) {
+      return body;
+    }
+    // 404 or empty → file not found
+    return null;
+  } catch {
+    // curl failed (vault unreachable) — throw, no silent disk fallback
+    throw new Error(`Vault identity read failed for ${filename}`);
+  }
+}
+
+/**
+ * Check whether vault I/O is available.
+ * Returns true if both the gateway workspace patch and the vault reader base URL
+ * are registered on globalThis.
+ */
+function isVaultAvailable(): boolean {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY];
+  const baseUrl = g[Symbol.for("openclaw.vaultReaderBaseUrl")];
+  return Boolean(factory && baseUrl);
+}
+
+export function loadIdentityFromFile(identityPath: string): AgentIdentityFile | null {
+  if (isVaultAvailable()) {
+    // Vault mode: read from vault using the filename (basename)
+    const filename = path.basename(identityPath);
+    try {
+      const content = syncVaultRead(filename);
+      if (!content) {
+        return null;
+      }
+      const parsed = parseIdentityMarkdown(content);
+      if (!identityHasValues(parsed)) {
+        return null;
+      }
+      return parsed;
+    } catch {
+      // Vault unreachable — no fallback to disk
+      return null;
+    }
+  }
+
+  // No vault registered (shouldn't happen in production, but safe for tests)
+  return null;
 }
 
 export function loadAgentIdentityFromWorkspace(workspace: string): AgentIdentityFile | null {

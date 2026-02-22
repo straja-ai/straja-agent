@@ -46,12 +46,27 @@ function buildMemorySection(params: {
   if (params.isMinimal) {
     return [];
   }
-  if (!params.availableTools.has("memory_search") && !params.availableTools.has("memory_get")) {
+  if (
+    !params.availableTools.has("memory_search") &&
+    !params.availableTools.has("memory_get") &&
+    !params.availableTools.has("vault_memory_search") &&
+    !params.availableTools.has("vault_memory_get")
+  ) {
     return [];
   }
+  const searchTool = params.availableTools.has("vault_memory_search")
+    ? "vault_memory_search"
+    : "memory_search";
+  const getTool = params.availableTools.has("vault_memory_get") ? "vault_memory_get" : "memory_get";
+  const writeTool = params.availableTools.has("vault_memory_write")
+    ? "vault_memory_write"
+    : "memory_write";
   const lines = [
     "## Memory Recall",
-    "Before answering anything about prior work, decisions, dates, people, preferences, or todos: run memory_search on MEMORY.md + memory/*.md; then use memory_get to pull only the needed lines. If low confidence after search, say you checked.",
+    `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first. If low confidence after search, say you checked.`,
+    "",
+    "## Memory Persistence",
+    `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
   ];
   if (params.citationsMode === "off") {
     lines.push(

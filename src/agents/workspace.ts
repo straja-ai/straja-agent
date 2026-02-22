@@ -7,6 +7,35 @@ import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.j
 import { resolveUserPath } from "../utils.js";
 import { resolveWorkspaceTemplateDir } from "./workspace-templates.js";
 
+// ---------------------------------------------------------------------------
+// Vault I/O bridge for workspace state + extra bootstrap files
+// ---------------------------------------------------------------------------
+
+/** Well-known Symbol for the gateway workspace patch (vault-backed file ops). */
+const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
+
+type VaultWorkspaceOps = {
+  readFile(filename: string): Promise<string | null>;
+  writeFile(filename: string, content: string): Promise<void>;
+};
+
+function resolveVaultWorkspaceOps(): VaultWorkspaceOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY] as (() => VaultWorkspaceOps) | undefined;
+  return factory?.();
+}
+
+/** Well-known Symbol for the bootstrap patch (vault-backed bootstrap file loader). */
+const BOOTSTRAP_PATCH_KEY = Symbol.for("openclaw.bootstrapPatchCallback");
+
+type VaultBootstrapLoader = (filename: string) => Promise<string | null>;
+
+function resolveVaultBootstrapLoader(): VaultBootstrapLoader | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[BOOTSTRAP_PATCH_KEY] as (() => VaultBootstrapLoader) | undefined;
+  return factory?.();
+}
+
 export function resolveDefaultAgentWorkspaceDir(
   env: NodeJS.ProcessEnv = process.env,
   homedir: () => string = os.homedir,
@@ -194,7 +223,30 @@ function parseWorkspaceOnboardingState(raw: string): WorkspaceOnboardingState | 
   }
 }
 
+/** Vault key for workspace state — stored as .openclaw/workspace-state.json in _workspace. */
+const WORKSPACE_STATE_VAULT_KEY = ".openclaw/workspace-state.json";
+
 async function readWorkspaceOnboardingState(statePath: string): Promise<WorkspaceOnboardingState> {
+  // Vault mode: read from vault _workspace collection
+  const vaultOps = resolveVaultWorkspaceOps();
+  if (vaultOps) {
+    try {
+      const raw = await vaultOps.readFile(WORKSPACE_STATE_VAULT_KEY);
+      if (raw) {
+        return (
+          parseWorkspaceOnboardingState(raw) ?? {
+            version: WORKSPACE_STATE_VERSION,
+          }
+        );
+      }
+      return { version: WORKSPACE_STATE_VERSION };
+    } catch {
+      // Vault unreachable — no fallback to disk
+      return { version: WORKSPACE_STATE_VERSION };
+    }
+  }
+
+  // No vault (shouldn't happen in production)
   try {
     const raw = await fs.readFile(statePath, "utf-8");
     return (
@@ -229,8 +281,17 @@ async function writeWorkspaceOnboardingState(
   statePath: string,
   state: WorkspaceOnboardingState,
 ): Promise<void> {
-  await fs.mkdir(path.dirname(statePath), { recursive: true });
   const payload = `${JSON.stringify(state, null, 2)}\n`;
+
+  // Vault mode: write to vault _workspace collection
+  const vaultOps = resolveVaultWorkspaceOps();
+  if (vaultOps) {
+    await vaultOps.writeFile(WORKSPACE_STATE_VAULT_KEY, payload);
+    return;
+  }
+
+  // No vault (shouldn't happen in production)
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
   const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now().toString(36)}`;
   try {
     await fs.writeFile(tmpPath, payload, { encoding: "utf-8" });
@@ -475,6 +536,32 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
     },
   ];
 
+  // Check for vault bootstrap patch (registered by straja-vault plugin).
+  // When present, ALL bootstrap file reads go through the vault — no disk access.
+  const g = globalThis as Record<symbol, unknown>;
+  const patchFactory = g[BOOTSTRAP_PATCH_KEY] as
+    | (() => (filename: string) => Promise<string | null>)
+    | undefined;
+  const vaultLoader = patchFactory?.();
+
+  if (vaultLoader) {
+    // Vault-backed loading: fetch each file from the vault's _workspace collection.
+    // MEMORY.md is NOT included — it lives in the vault's _memory collection and
+    // is injected separately via the before_prompt_build hook. Including it here
+    // would cause double injection.
+    const result: WorkspaceBootstrapFile[] = [];
+    for (const entry of entries) {
+      const content = await vaultLoader(entry.name);
+      if (content !== null) {
+        result.push({ name: entry.name, path: entry.filePath, content, missing: false });
+      } else {
+        result.push({ name: entry.name, path: entry.filePath, missing: true });
+      }
+    }
+    return result;
+  }
+
+  // Original disk-backed loading (only when vault plugin is NOT loaded).
   entries.push(...(await resolveMemoryBootstrapEntries(resolvedDir)));
 
   const result: WorkspaceBootstrapFile[] = [];
@@ -513,6 +600,52 @@ export async function loadExtraBootstrapFiles(
   if (!extraPatterns.length) {
     return [];
   }
+
+  // Vault mode: use bootstrap patch loader instead of fs.glob + disk reads
+  const vaultLoader = resolveVaultBootstrapLoader();
+  if (vaultLoader) {
+    const result: WorkspaceBootstrapFile[] = [];
+    // In vault mode, we resolve patterns to basenames and load each from vault.
+    // The vault doesn't support glob, but extra bootstrap patterns are typically
+    // literal filenames or simple patterns resolving to known bootstrap names.
+    const filenames = new Set<string>();
+    for (const pattern of extraPatterns) {
+      // Extract basename — if it's a glob, iterate known bootstrap names that match
+      if (pattern.includes("*") || pattern.includes("?") || pattern.includes("{")) {
+        // For glob patterns, check all valid bootstrap names against the pattern
+        for (const name of VALID_BOOTSTRAP_NAMES) {
+          // Simple glob matching: *.md matches all .md files, **/*.md too
+          if (pattern === "*.md" || pattern === "**/*.md" || pattern.endsWith("/" + name)) {
+            filenames.add(name);
+          }
+        }
+      } else {
+        const baseName = path.basename(pattern);
+        if (VALID_BOOTSTRAP_NAMES.has(baseName)) {
+          filenames.add(baseName);
+        }
+      }
+    }
+
+    for (const filename of filenames) {
+      try {
+        const content = await vaultLoader(filename);
+        if (content !== null) {
+          result.push({
+            name: filename as WorkspaceBootstrapFileName,
+            path: path.join(resolveUserPath(dir), filename),
+            content,
+            missing: false,
+          });
+        }
+      } catch {
+        // Vault unreachable for this file — skip
+      }
+    }
+    return result;
+  }
+
+  // No vault (shouldn't happen in production)
   const resolvedDir = resolveUserPath(dir);
   let realResolvedDir = resolvedDir;
   try {

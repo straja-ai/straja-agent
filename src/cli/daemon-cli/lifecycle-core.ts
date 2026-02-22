@@ -4,6 +4,7 @@ import { checkTokenDrift } from "../../daemon/service-audit.js";
 import type { GatewayService } from "../../daemon/service.js";
 import { renderSystemdUnavailableHints } from "../../daemon/systemd-hints.js";
 import { isSystemdUserServiceAvailable } from "../../daemon/systemd.js";
+import { tryStopForegroundGateway } from "../../infra/gateway-lock.js";
 import { isWSL } from "../../infra/wsl.js";
 import { defaultRuntime } from "../../runtime.js";
 import {
@@ -203,6 +204,37 @@ export async function runServiceStop(params: {
     return;
   }
   if (!loaded) {
+    // Fallback: try to stop a foreground gateway via its lockfile
+    const lockStop = await tryStopForegroundGateway();
+    if (lockStop.result === "stopped") {
+      const pidInfo = lockStop.pid ? ` (pid ${lockStop.pid})` : "";
+      emit({
+        ok: true,
+        result: "stopped",
+        message: `${params.serviceNoun} foreground process stopped${pidInfo}.`,
+        service: buildDaemonServiceSnapshot(params.service, false),
+      });
+      if (!json) {
+        defaultRuntime.log(`${params.serviceNoun} foreground process stopped${pidInfo}.`);
+      }
+      return;
+    }
+    if (lockStop.result === "not-running") {
+      const pidInfo = lockStop.pid ? ` (stale lock for pid ${lockStop.pid} cleaned up)` : "";
+      emit({
+        ok: true,
+        result: "not-loaded",
+        message: `${params.serviceNoun} service ${params.service.notLoadedText}${pidInfo}.`,
+        service: buildDaemonServiceSnapshot(params.service, loaded),
+      });
+      if (!json) {
+        defaultRuntime.log(
+          `${params.serviceNoun} service ${params.service.notLoadedText}${pidInfo}.`,
+        );
+      }
+      return;
+    }
+    // No service, no lockfile — truly not running
     emit({
       ok: true,
       result: "not-loaded",

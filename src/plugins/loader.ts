@@ -624,11 +624,18 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     try {
       const result = register(api);
       if (result && typeof result.then === "function") {
+        // Collect the promise so callers can await async setup (e.g. prototype
+        // patches) before using the affected subsystems.
+        registry.pendingSetup.push(
+          result.catch((err: unknown) => {
+            logger.error(`[plugins] ${record.id} async setup failed: ${String(err)}`);
+          }),
+        );
         registry.diagnostics.push({
           level: "warn",
           pluginId: record.id,
           source: record.source,
-          message: "plugin register returned a promise; async registration is ignored",
+          message: "plugin register returned a promise; async setup deferred",
         });
       }
       registry.plugins.push(record);

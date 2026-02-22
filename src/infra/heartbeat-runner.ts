@@ -540,7 +540,15 @@ async function resolveHeartbeatPreflight(params: {
   const workspaceDir = resolveAgentWorkspaceDir(params.cfg, params.agentId);
   const heartbeatFilePath = path.join(workspaceDir, DEFAULT_HEARTBEAT_FILENAME);
   try {
-    const heartbeatFileContent = await fs.readFile(heartbeatFilePath, "utf-8");
+    // Check for vault bootstrap patch — when present, read from vault instead of disk.
+    const g = globalThis as Record<symbol, unknown>;
+    const patchFactory = g[Symbol.for("openclaw.bootstrapPatchCallback")] as
+      | (() => (filename: string) => Promise<string | null>)
+      | undefined;
+    const vaultLoader = patchFactory?.();
+    const heartbeatFileContent = vaultLoader
+      ? ((await vaultLoader(DEFAULT_HEARTBEAT_FILENAME)) ?? "")
+      : await fs.readFile(heartbeatFilePath, "utf-8");
     if (isHeartbeatContentEffectivelyEmpty(heartbeatFileContent)) {
       return {
         ...basePreflight,

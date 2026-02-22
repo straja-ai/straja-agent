@@ -80,6 +80,8 @@ export type PluginHookRegistration = {
   entry: HookEntry;
   events: string[];
   source: string;
+  /** The handler function, retained so plugin hooks can be re-registered after clearInternalHooks(). */
+  handler?: Parameters<typeof registerInternalHook>[1];
 };
 
 export type PluginServiceRegistration = {
@@ -135,6 +137,8 @@ export type PluginRegistry = {
   services: PluginServiceRegistration[];
   commands: PluginCommandRegistration[];
   diagnostics: PluginDiagnostic[];
+  /** Promises from plugins whose register() returned a promise (async setup). */
+  pendingSetup: Promise<void>[];
 };
 
 export type PluginRegistryParams = {
@@ -158,7 +162,41 @@ export function createEmptyPluginRegistry(): PluginRegistry {
     services: [],
     commands: [],
     diagnostics: [],
+    pendingSetup: [],
   };
+}
+
+/**
+ * Await any pending async setup work from plugins whose register() returned a
+ * promise.  Call this before code that depends on prototype patches or other
+ * async side-effects applied during plugin registration.
+ */
+export async function flushPluginSetup(registry: PluginRegistry): Promise<void> {
+  if (registry.pendingSetup.length === 0) {
+    return;
+  }
+  await Promise.all(registry.pendingSetup);
+  registry.pendingSetup.length = 0;
+}
+
+/**
+ * Re-register plugin internal-hook handlers that were stored during plugin
+ * loading.  Call this after `clearInternalHooks()` so that hooks registered
+ * by plugins (via `api.registerHook()`) survive the clear-then-reload cycle
+ * in `startGatewaySidecars`.
+ */
+export function reRegisterPluginInternalHooks(registry: PluginRegistry): number {
+  let count = 0;
+  for (const hook of registry.hooks) {
+    if (!hook.handler) {
+      continue;
+    }
+    for (const event of hook.events) {
+      registerInternalHook(event, hook.handler);
+      count++;
+    }
+  }
+  return count;
 }
 
 export function createPluginRegistry(registryParams: PluginRegistryParams) {
@@ -249,15 +287,18 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
         };
 
     record.hookNames.push(name);
+    const hookSystemEnabled = config?.hooks?.internal?.enabled === true;
+    const shouldRegister = hookSystemEnabled && opts?.register !== false;
+
     registry.hooks.push({
       pluginId: record.id,
       entry: hookEntry,
       events: normalizedEvents,
       source: record.source,
+      handler: shouldRegister ? handler : undefined,
     });
 
-    const hookSystemEnabled = config?.hooks?.internal?.enabled === true;
-    if (!hookSystemEnabled || opts?.register === false) {
+    if (!shouldRegister) {
       return;
     }
 

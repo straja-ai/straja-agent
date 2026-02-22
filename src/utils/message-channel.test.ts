@@ -18,6 +18,7 @@ const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry =>
   cliRegistrars: [],
   services: [],
   diagnostics: [],
+  pendingSetup: [],
 });
 
 const emptyRegistry = createRegistry([]);

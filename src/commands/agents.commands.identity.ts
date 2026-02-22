@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { identityHasValues, parseIdentityMarkdown } from "../agents/identity-file.js";
@@ -37,17 +36,40 @@ const coerceTrimmed = (value?: string) => {
   return trimmed ? trimmed : undefined;
 };
 
+/** Well-known Symbol for the gateway workspace patch (vault-backed file ops). */
+const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
+
+type VaultReadFileFn = (filename: string) => Promise<string | null>;
+
+function resolveVaultReadFile(): VaultReadFileFn | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY] as
+    | (() => { readFile: VaultReadFileFn })
+    | undefined;
+  return factory?.()?.readFile;
+}
+
 async function loadIdentityFromFile(filePath: string): Promise<AgentIdentity | null> {
-  try {
-    const content = await fs.readFile(filePath, "utf-8");
-    const parsed = parseIdentityMarkdown(content);
-    if (!identityHasValues(parsed)) {
+  const vaultReadFile = resolveVaultReadFile();
+  if (vaultReadFile) {
+    // Vault mode: read from vault using the filename (basename)
+    const filename = path.basename(filePath);
+    try {
+      const content = await vaultReadFile(filename);
+      if (!content) {
+        return null;
+      }
+      const parsed = parseIdentityMarkdown(content);
+      if (!identityHasValues(parsed)) {
+        return null;
+      }
+      return parsed;
+    } catch {
       return null;
     }
-    return parsed;
-  } catch {
-    return null;
   }
+  // No vault registered — shouldn't happen in production
+  return null;
 }
 
 function resolveAgentIdByWorkspace(

@@ -4,6 +4,8 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   createAgentSession,
   estimateTokens,
+  migrateSessionEntries,
+  parseSessionEntries,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -13,6 +15,8 @@ import { resolveChannelCapabilities } from "../../config/channel-capabilities.js
 import type { OpenClawConfig } from "../../config/config.js";
 import { getMachineDisplayName } from "../../infra/machine-name.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+import { flushPluginSetup } from "../../plugins/registry.js";
+import { getActivePluginRegistry } from "../../plugins/runtime.js";
 import { type enqueueCommand, enqueueCommandInLane } from "../../process/command-queue.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
 import { resolveSignalReactionLevel } from "../../signal/reaction-level.js";
@@ -522,6 +526,20 @@ export async function compactEmbeddedPiSessionDirect(
         provider,
         modelId,
       });
+      // Invoke any session patch callback registered by plugins on globalThis.
+      const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
+      const g = globalThis as Record<symbol, unknown>;
+      if (typeof g[SESSION_PATCH_KEY] === "function") {
+        g[SESSION_PATCH_KEY](SessionManager, parseSessionEntries, migrateSessionEntries);
+        delete g[SESSION_PATCH_KEY];
+      }
+
+      // Flush any async plugin setup promises.
+      const pluginRegistry = getActivePluginRegistry();
+      if (pluginRegistry) {
+        await flushPluginSetup(pluginRegistry);
+      }
+
       const sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,

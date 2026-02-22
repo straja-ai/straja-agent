@@ -128,7 +128,7 @@ function resolveGatewayOwnerStatus(
   return isGatewayArgv(args) ? "alive" : "dead";
 }
 
-async function readLockPayload(lockPath: string): Promise<LockPayload | null> {
+export async function readLockPayload(lockPath: string): Promise<LockPayload | null> {
   try {
     const raw = await fs.readFile(lockPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<LockPayload>;
@@ -153,7 +153,7 @@ async function readLockPayload(lockPath: string): Promise<LockPayload | null> {
   }
 }
 
-function resolveGatewayLockPath(env: NodeJS.ProcessEnv) {
+export function resolveGatewayLockPath(env: NodeJS.ProcessEnv) {
   const stateDir = resolveStateDir(env);
   const configPath = resolveConfigPath(env, stateDir);
   const hash = createHash("sha1").update(configPath).digest("hex").slice(0, 8);
@@ -246,4 +246,74 @@ export async function acquireGatewayLock(
 
   const owner = lastPayload?.pid ? ` (pid ${lastPayload.pid})` : "";
   throw new GatewayLockError(`gateway already running${owner}; lock timeout after ${timeoutMs}ms`);
+}
+
+// =============================================================================
+// Foreground gateway stop (lockfile-based fallback)
+// =============================================================================
+
+export type ForegroundStopResult = "stopped" | "not-running" | "no-lock";
+
+/**
+ * Attempt to stop a foreground-running gateway by reading its lockfile and
+ * killing the owner pid. Used as a fallback when `gateway stop` finds no
+ * service manager (launchd/systemd/schtasks) but a lockfile exists.
+ *
+ * Returns:
+ *  - "stopped"     — pid was alive, SIGTERM (or SIGKILL) sent, lockfile removed
+ *  - "not-running" — lockfile exists but pid is dead (stale lock cleaned up)
+ *  - "no-lock"     — no lockfile found
+ */
+export async function tryStopForegroundGateway(
+  opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
+): Promise<{ result: ForegroundStopResult; pid?: number }> {
+  const env = opts.env ?? process.env;
+  const platform = opts.platform ?? process.platform;
+  const { lockPath } = resolveGatewayLockPath(env);
+
+  const payload = await readLockPayload(lockPath);
+  if (!payload) {
+    return { result: "no-lock" };
+  }
+
+  const ownerStatus = resolveGatewayOwnerStatus(payload.pid, payload, platform);
+  if (ownerStatus === "dead") {
+    // Stale lockfile — clean it up
+    await fs.rm(lockPath, { force: true });
+    return { result: "not-running", pid: payload.pid };
+  }
+
+  // Send SIGTERM
+  try {
+    process.kill(payload.pid, "SIGTERM");
+  } catch {
+    // Process may have exited between check and kill
+    await fs.rm(lockPath, { force: true });
+    return { result: "not-running", pid: payload.pid };
+  }
+
+  // Wait up to 3 seconds for graceful shutdown
+  const pollMs = 100;
+  const maxWaitMs = 3000;
+  let waited = 0;
+  while (waited < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    waited += pollMs;
+    if (!isPidAlive(payload.pid)) {
+      await fs.rm(lockPath, { force: true });
+      return { result: "stopped", pid: payload.pid };
+    }
+  }
+
+  // Escalate to SIGKILL
+  try {
+    process.kill(payload.pid, "SIGKILL");
+  } catch {
+    // Already dead
+  }
+
+  // Brief wait for SIGKILL to take effect
+  await new Promise((r) => setTimeout(r, 200));
+  await fs.rm(lockPath, { force: true });
+  return { result: "stopped", pid: payload.pid };
 }

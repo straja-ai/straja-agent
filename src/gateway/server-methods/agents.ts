@@ -59,6 +59,21 @@ const BOOTSTRAP_FILE_NAMES_POST_ONBOARDING = BOOTSTRAP_FILE_NAMES.filter(
 
 const MEMORY_FILE_NAMES = [DEFAULT_MEMORY_FILENAME, DEFAULT_MEMORY_ALT_FILENAME] as const;
 
+/** Well-known Symbol for vault gateway workspace patch. */
+const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
+
+type GatewayWorkspaceOps = {
+  statFile(filename: string): Promise<FileMeta | null>;
+  readFile(filename: string): Promise<string | null>;
+  writeFile(filename: string, content: string): Promise<void>;
+};
+
+function resolveVaultOps(): GatewayWorkspaceOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[GATEWAY_WORKSPACE_PATCH_KEY] as (() => GatewayWorkspaceOps) | undefined;
+  return factory?.();
+}
+
 const ALLOWED_FILE_NAMES = new Set<string>([...BOOTSTRAP_FILE_NAMES, ...MEMORY_FILE_NAMES]);
 
 function resolveAgentWorkspaceFileOrRespondError(
@@ -98,6 +113,11 @@ type FileMeta = {
 };
 
 async function statFile(filePath: string): Promise<FileMeta | null> {
+  const vaultOps = resolveVaultOps();
+  if (vaultOps) {
+    const filename = path.basename(filePath);
+    return vaultOps.statFile(filename);
+  }
   try {
     const stat = await fs.stat(filePath);
     if (!stat.isFile()) {
@@ -466,7 +486,10 @@ export const agentsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const content = await fs.readFile(filePath, "utf-8");
+    const vaultOps = resolveVaultOps();
+    const content = vaultOps
+      ? ((await vaultOps.readFile(name)) ?? "")
+      : await fs.readFile(filePath, "utf-8");
     respond(
       true,
       {
@@ -503,10 +526,15 @@ export const agentsHandlers: GatewayRequestHandlers = {
       return;
     }
     const { agentId, workspaceDir, name } = resolved;
-    await fs.mkdir(workspaceDir, { recursive: true });
     const filePath = path.join(workspaceDir, name);
     const content = String(params.content ?? "");
-    await fs.writeFile(filePath, content, "utf-8");
+    const vaultOps = resolveVaultOps();
+    if (vaultOps) {
+      await vaultOps.writeFile(name, content);
+    } else {
+      await fs.mkdir(workspaceDir, { recursive: true });
+      await fs.writeFile(filePath, content, "utf-8");
+    }
     const meta = await statFile(filePath);
     respond(
       true,

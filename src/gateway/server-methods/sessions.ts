@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import { resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun, waitForEmbeddedPiRunEnd } from "../../agents/pi-embedded.js";
 import { stopSubagentsForRequester } from "../../auto-reply/reply/abort.js";
@@ -26,16 +25,17 @@ import {
   validateSessionsResolveParams,
 } from "../protocol/index.js";
 import {
-  archiveFileOnDisk,
   archiveSessionTranscripts,
   listSessionsFromStore,
   loadCombinedSessionStoreForGateway,
   loadSessionEntry,
   pruneLegacyStoreKeys,
   readSessionPreviewItemsFromTranscript,
+  readVaultSessionContent,
   resolveGatewaySessionStoreTarget,
   resolveSessionModelRef,
   resolveSessionTranscriptCandidates,
+  vaultWriteSessionContent,
   type SessionsPatchResult,
   type SessionsPreviewEntry,
   type SessionsPreviewResult,
@@ -459,13 +459,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const filePath = resolveSessionTranscriptCandidates(
+    const candidates = resolveSessionTranscriptCandidates(
       sessionId,
       storePath,
       entry?.sessionFile,
       target.agentId,
-    ).find((candidate) => fs.existsSync(candidate));
-    if (!filePath) {
+    );
+
+    // Read session content from vault
+    const raw = readVaultSessionContent(candidates);
+    if (!raw) {
       respond(
         true,
         {
@@ -479,7 +482,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const raw = fs.readFileSync(filePath, "utf-8");
     const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
     if (lines.length <= maxLines) {
       respond(
@@ -495,9 +497,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const archived = archiveFileOnDisk(filePath, "bak");
     const keptLines = lines.slice(-maxLines);
-    fs.writeFileSync(filePath, `${keptLines.join("\n")}\n`, "utf-8");
+    // Write compacted content back to vault
+    vaultWriteSessionContent(candidates, `${keptLines.join("\n")}\n`);
 
     await updateSessionStore(storePath, (store) => {
       const entryKey = compactTarget.primaryKey;
@@ -518,7 +520,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         ok: true,
         key: target.canonicalKey,
         compacted: true,
-        archived,
         kept: keptLines.length,
       },
       undefined,

@@ -303,6 +303,100 @@ export function createOpenClawCodingTools(options?: {
   }
   const imageSanitization = resolveImageSanitizationLimits(options?.config);
 
+  // Vault FS tools patch: plugins (e.g. straja-vault) register a callback on
+  // globalThis that replaces read/write/edit operations with vault-backed versions.
+  //
+  // TIMING: Plugins load inside createOpenClawTools() (called later in this function),
+  // so the callback doesn't exist yet during the flatMap below. We create LAZY
+  // operation wrappers that resolve the vault callback on first invocation — by
+  // then plugins have loaded and registered the callback.
+  const FS_TOOLS_PATCH_KEY = Symbol.for("openclaw.fsToolsPatchCallback");
+  type VaultOpsResult = {
+    readOperations: {
+      readFile: (p: string) => Promise<Buffer>;
+      access: (p: string) => Promise<void>;
+      detectImageMimeType?: (p: string) => Promise<string | null | undefined>;
+    };
+    writeOperations: {
+      writeFile: (p: string, c: string) => Promise<void>;
+      mkdir: (d: string) => Promise<void>;
+    };
+    editOperations: {
+      readFile: (p: string) => Promise<Buffer>;
+      writeFile: (p: string, c: string) => Promise<void>;
+      access: (p: string) => Promise<void>;
+    };
+  };
+  let _resolvedVaultOps: VaultOpsResult | null | undefined;
+  function resolveVaultOps(): VaultOpsResult | undefined {
+    if (_resolvedVaultOps !== undefined) {
+      return _resolvedVaultOps ?? undefined;
+    }
+    const fn = (globalThis as Record<symbol, unknown>)[FS_TOOLS_PATCH_KEY];
+    if (typeof fn === "function") {
+      _resolvedVaultOps = (fn as (root: string) => VaultOpsResult)(workspaceRoot);
+    } else {
+      _resolvedVaultOps = null;
+    }
+    return _resolvedVaultOps ?? undefined;
+  }
+  // Lazy read operations: each function resolves vault ops on first call.
+  // If vault patch exists → delegates to vault. If not → throws (no disk fallback).
+  // SECURITY: These operations MUST NOT fall back to fs/promises. The vault is the
+  // sole I/O layer. If the vault plugin is not loaded, file operations must fail
+  // rather than silently touching the host filesystem.
+  const lazyReadOperations = {
+    readFile: async (absolutePath: string): Promise<Buffer> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.readOperations.readFile(absolutePath);
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk read of '${absolutePath}'`,
+      );
+    },
+    access: async (absolutePath: string): Promise<void> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.readOperations.access(absolutePath);
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk access check of '${absolutePath}'`,
+      );
+    },
+    detectImageMimeType: async (absolutePath: string): Promise<string | null | undefined> => {
+      const v = resolveVaultOps();
+      if (v?.readOperations.detectImageMimeType) {
+        return v.readOperations.detectImageMimeType(absolutePath);
+      }
+      // Image MIME detection is safe (extension-based, no disk I/O), return undefined to skip
+      return undefined;
+    },
+  };
+  const lazyWriteOperations = {
+    writeFile: async (absolutePath: string, content: string): Promise<void> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.writeOperations.writeFile(absolutePath, content);
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk write to '${absolutePath}'`,
+      );
+    },
+    mkdir: async (dir: string): Promise<void> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.writeOperations.mkdir(dir);
+      }
+      throw new Error(`[vault-fs] Vault FS patch not available — refusing disk mkdir '${dir}'`);
+    },
+  };
+  const lazyEditOperations = {
+    readFile: lazyReadOperations.readFile,
+    writeFile: lazyWriteOperations.writeFile,
+    access: lazyReadOperations.access,
+  };
+
   const base = (codingTools as unknown as AnyAgentTool[]).flatMap((tool) => {
     if (tool.name === readTool.name) {
       if (sandboxRoot) {
@@ -314,12 +408,15 @@ export function createOpenClawCodingTools(options?: {
         });
         return [workspaceOnly ? wrapToolWorkspaceRootGuard(sandboxed, sandboxRoot) : sandboxed];
       }
-      const freshReadTool = createReadTool(workspaceRoot);
+      const freshReadTool = createReadTool(workspaceRoot, {
+        operations: lazyReadOperations,
+      });
       const wrapped = createOpenClawReadTool(freshReadTool, {
         modelContextWindowTokens: options?.modelContextWindowTokens,
         imageSanitization,
       });
-      return [workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped];
+      const final = workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped;
+      return [final];
     }
     if (tool.name === "bash" || tool.name === execToolName) {
       return [];
@@ -330,10 +427,13 @@ export function createOpenClawCodingTools(options?: {
       }
       // Wrap with param normalization for Claude Code compatibility
       const wrapped = wrapToolParamNormalization(
-        createWriteTool(workspaceRoot),
+        createWriteTool(workspaceRoot, {
+          operations: lazyWriteOperations,
+        }),
         CLAUDE_PARAM_GROUPS.write,
       );
-      return [workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped];
+      const final = workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped;
+      return [final];
     }
     if (tool.name === "edit") {
       if (sandboxRoot) {
@@ -341,13 +441,17 @@ export function createOpenClawCodingTools(options?: {
       }
       // Wrap with param normalization for Claude Code compatibility
       const wrapped = wrapToolParamNormalization(
-        createEditTool(workspaceRoot),
+        createEditTool(workspaceRoot, {
+          operations: lazyEditOperations,
+        }),
         CLAUDE_PARAM_GROUPS.edit,
       );
-      return [workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped];
+      const final = workspaceOnly ? wrapToolWorkspaceRootGuard(wrapped, workspaceRoot) : wrapped;
+      return [final];
     }
     return [tool];
   });
+
   const { cleanupMs: cleanupMsOverride, ...execDefaults } = options?.exec ?? {};
   const execTool = createExecTool({
     ...execDefaults,
@@ -459,6 +563,37 @@ export function createOpenClawCodingTools(options?: {
       senderIsOwner: options?.senderIsOwner,
     }),
   ];
+  // When vault FS patch is active, rename read/write/edit → vault_read/vault_write/vault_edit
+  // so the tool names make it explicit that operations go through the vault, not disk.
+  // This runs AFTER createOpenClawTools() which loads plugins and registers the vault callback.
+  const VAULT_TOOL_RENAMES: Record<string, string> = {
+    read: "vault_read",
+    write: "vault_write",
+    edit: "vault_edit",
+  };
+  if (resolveVaultOps()) {
+    for (const tool of tools) {
+      const newName = VAULT_TOOL_RENAMES[tool.name];
+      if (newName) {
+        (tool as { name: string }).name = newName;
+      }
+    }
+  }
+
+  // Remove native exec/process tools unconditionally.
+  // All command execution goes through vault_exec/vault_process which run inside
+  // the vault's nono kernel sandbox with workspace materialization and file diff capture.
+  // Native exec (Docker/host) and process (in-memory sessions) are never allowed —
+  // there is no fallback to host execution.
+  {
+    const removeNames = new Set(["exec", "process"]);
+    for (let i = tools.length - 1; i >= 0; i--) {
+      if (removeNames.has(tools[i].name)) {
+        tools.splice(i, 1);
+      }
+    }
+  }
+
   // Security: treat unknown/undefined as unauthorized (opt-in, not opt-out)
   const senderIsOwner = options?.senderIsOwner === true;
   const toolsByAuthorization = applyOwnerOnlyToolPolicy(tools, senderIsOwner);

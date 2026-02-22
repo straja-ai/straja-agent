@@ -14,12 +14,12 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
 
 export const TOOL_GROUPS: Record<string, string[]> = {
   // NOTE: Keep canonical (lowercase) tool names here.
-  "group:memory": ["memory_search", "memory_get"],
+  "group:memory": ["memory_search", "memory_get", "vault_memory_search", "vault_memory_get"],
   "group:web": ["web_search", "web_fetch"],
   // Basic workspace/file tools
   "group:fs": ["read", "write", "edit", "apply_patch"],
-  // Host/runtime execution tools
-  "group:runtime": ["exec", "process"],
+  // Host/runtime execution tools (includes vault equivalents)
+  "group:runtime": ["exec", "process", "vault_exec", "vault_process"],
   // Session management tools
   "group:sessions": [
     "sessions_list",

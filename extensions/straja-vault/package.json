@@ -1,0 +1,22 @@
+{
+  "name": "@openclaw/straja-vault",
+  "version": "2026.2.20",
+  "description": "OpenClaw plugin for Straja Vault document search and retrieval",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "install": {
+      "npmSpec": "@openclaw/straja-vault",
+      "localPath": "extensions/straja-vault",
+      "defaultChoice": "npm"
+    }
+  }
+}

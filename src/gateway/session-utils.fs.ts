@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,118 @@ import { extractToolCallNames, hasToolCall } from "../utils/transcript-tools.js"
 import { stripEnvelope } from "./chat-sanitize.js";
 import type { SessionPreviewItem } from "./session-utils.types.js";
 
+// ---------------------------------------------------------------------------
+// Vault reader — reads session transcripts from Straja Vault HTTP API
+// instead of the filesystem. The vault base URL is set on globalThis by
+// the straja-vault plugin during register().
+// ---------------------------------------------------------------------------
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+const VAULT_COLLECTION = "_sessions";
+
+function getVaultBaseUrl(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const url = g[VAULT_READER_KEY];
+  if (typeof url === "string") {
+    return url;
+  }
+  // Fallback to env var (always available, even before plugin registers)
+  return process.env.STRAJA_VAULT_URL || "http://localhost:8181";
+}
+
+/**
+ * Extract just the filename from a full filesystem path.
+ * e.g. "/Users/x/.openclaw/agents/vault/sessions/abc-123.jsonl" -> "abc-123.jsonl"
+ */
+function pathToVaultKey(filePath: string): string {
+  return path.basename(filePath);
+}
+
+/**
+ * Synchronous HTTP GET from vault via curl.
+ * Returns the raw JSONL text content, or null if not found / unreachable.
+ */
+function vaultGet(baseUrl: string, key: string): string | null {
+  const url = `${baseUrl}/raw/${VAULT_COLLECTION}/${encodeURIComponent(key)}`;
+  try {
+    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", url], {
+      encoding: "utf-8",
+      timeout: 5_000,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const lines = result.trimEnd().split("\n");
+    const statusLine = lines.pop() || "0";
+    const status = parseInt(statusLine, 10);
+    if (status !== 200) {
+      return null;
+    }
+    const body = lines.join("\n");
+    return body.trim() ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write session JSONL content to vault (synchronous).
+ * Used by the compact handler in sessions.ts.
+ */
+export function vaultWriteSessionContent(candidates: string[], content: string): void {
+  const baseUrl = getVaultBaseUrl();
+  if (!baseUrl) {
+    return;
+  }
+
+  const key = pathToVaultKey(candidates[0]);
+  const url = `${baseUrl}/raw/${VAULT_COLLECTION}/${encodeURIComponent(key)}`;
+  try {
+    execFileSync(
+      "curl",
+      ["-s", "-X", "PUT", "-H", "Content-Type: text/plain", "--data-binary", "@-", url],
+      {
+        input: content,
+        encoding: "utf-8",
+        timeout: 5_000,
+        maxBuffer: 1024,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+  } catch (err) {
+    console.error(`[vault-session] PUT ${url} failed: ${String(err)}`);
+  }
+}
+
+/** Check if vault storage is configured. */
+export { getVaultBaseUrl };
+
+/**
+ * Read session JSONL content from vault for the given session candidates.
+ * Tries each candidate path's filename as a vault key. Returns the raw
+ * JSONL string on success, or null if not found.
+ */
+export function readVaultSessionContent(candidates: string[]): string | null {
+  const baseUrl = getVaultBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
+
+  // Deduplicate vault keys (multiple paths may yield the same filename)
+  const triedKeys = new Set<string>();
+  for (const candidate of candidates) {
+    const key = pathToVaultKey(candidate);
+    if (triedKeys.has(key)) {
+      continue;
+    }
+    triedKeys.add(key);
+
+    const content = vaultGet(baseUrl, key);
+    if (content) {
+      return content;
+    }
+  }
+  return null;
+}
+
 type SessionTitleFields = {
   firstUserMessage: string | null;
   lastMessagePreview: string | null;
@@ -25,7 +138,7 @@ type SessionTitleFieldsCacheEntry = SessionTitleFields & {
 const sessionTitleFieldsCache = new Map<string, SessionTitleFieldsCacheEntry>();
 const MAX_SESSION_TITLE_FIELDS_CACHE_ENTRIES = 5000;
 
-function readSessionTitleFieldsCacheKey(
+function _readSessionTitleFieldsCacheKey(
   filePath: string,
   opts?: { includeInterSession?: boolean },
 ) {
@@ -33,7 +146,7 @@ function readSessionTitleFieldsCacheKey(
   return `${filePath}\t${includeInterSession}`;
 }
 
-function getCachedSessionTitleFields(cacheKey: string, stat: fs.Stats): SessionTitleFields | null {
+function _getCachedSessionTitleFields(cacheKey: string, stat: fs.Stats): SessionTitleFields | null {
   const cached = sessionTitleFieldsCache.get(cacheKey);
   if (!cached) {
     return null;
@@ -51,7 +164,7 @@ function getCachedSessionTitleFields(cacheKey: string, stat: fs.Stats): SessionT
   };
 }
 
-function setCachedSessionTitleFields(cacheKey: string, stat: fs.Stats, value: SessionTitleFields) {
+function _setCachedSessionTitleFields(cacheKey: string, stat: fs.Stats, value: SessionTitleFields) {
   sessionTitleFieldsCache.set(cacheKey, {
     ...value,
     mtimeMs: stat.mtimeMs,
@@ -73,12 +186,12 @@ export function readSessionMessages(
 ): unknown[] {
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile);
 
-  const filePath = candidates.find((p) => fs.existsSync(p));
-  if (!filePath) {
+  const rawText = readVaultSessionContent(candidates);
+  if (!rawText) {
     return [];
   }
 
-  const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+  const lines = rawText.split(/\r?\n/);
   const messages: unknown[] = [];
   for (const line of lines) {
     if (!line.trim()) {
@@ -300,68 +413,31 @@ export function readSessionTitleFieldsFromTranscript(
   opts?: { includeInterSession?: boolean },
 ): SessionTitleFields {
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-  const filePath = candidates.find((p) => fs.existsSync(p));
-  if (!filePath) {
+
+  const content = readVaultSessionContent(candidates);
+  if (!content) {
     return { firstUserMessage: null, lastMessagePreview: null };
   }
 
-  let stat: fs.Stats;
+  // Extract first user message from head
+  let firstUserMessage: string | null = null;
   try {
-    stat = fs.statSync(filePath);
+    const headChunk = content.slice(0, 8192);
+    firstUserMessage = extractFirstUserMessageFromTranscriptChunk(headChunk, opts);
   } catch {
-    return { firstUserMessage: null, lastMessagePreview: null };
+    // ignore
   }
 
-  const cacheKey = readSessionTitleFieldsCacheKey(filePath, opts);
-  const cached = getCachedSessionTitleFields(cacheKey, stat);
-  if (cached) {
-    return cached;
-  }
-
-  if (stat.size === 0) {
-    const empty = { firstUserMessage: null, lastMessagePreview: null };
-    setCachedSessionTitleFields(cacheKey, stat, empty);
-    return empty;
-  }
-
-  let fd: number | null = null;
+  // Extract last message preview from tail
+  let lastMessagePreview: string | null = null;
   try {
-    fd = fs.openSync(filePath, "r");
-    const size = stat.size;
-
-    // Head (first user message)
-    let firstUserMessage: string | null = null;
-    try {
-      const chunk = readTranscriptHeadChunk(fd);
-      if (chunk) {
-        firstUserMessage = extractFirstUserMessageFromTranscriptChunk(chunk, opts);
-      }
-    } catch {
-      // ignore head read errors
-    }
-
-    // Tail (last message preview)
-    let lastMessagePreview: string | null = null;
-    try {
-      lastMessagePreview = readLastMessagePreviewFromOpenTranscript({ fd, size });
-    } catch {
-      // ignore tail read errors
-    }
-
-    const result = { firstUserMessage, lastMessagePreview };
-    setCachedSessionTitleFields(cacheKey, stat, result);
-    return result;
+    const tailChunk = content.slice(-LAST_MSG_MAX_BYTES);
+    lastMessagePreview = extractLastMessagePreviewFromChunk(tailChunk);
   } catch {
-    return { firstUserMessage: null, lastMessagePreview: null };
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
+    // ignore
   }
+
+  return { firstUserMessage, lastMessagePreview };
 }
 
 function extractTextFromContent(content: TranscriptMessage["content"]): string | null {
@@ -385,7 +461,7 @@ function extractTextFromContent(content: TranscriptMessage["content"]): string |
   return null;
 }
 
-function readTranscriptHeadChunk(fd: number, maxBytes = 8192): string | null {
+function _readTranscriptHeadChunk(fd: number, maxBytes = 8192): string | null {
   const buf = Buffer.alloc(maxBytes);
   const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
   if (bytesRead <= 0) {
@@ -423,7 +499,7 @@ function extractFirstUserMessageFromTranscriptChunk(
   return null;
 }
 
-function findExistingTranscriptPath(
+function _findExistingTranscriptPath(
   sessionId: string,
   storePath: string | undefined,
   sessionFile?: string,
@@ -433,7 +509,7 @@ function findExistingTranscriptPath(
   return candidates.find((p) => fs.existsSync(p)) ?? null;
 }
 
-function withOpenTranscriptFd<T>(filePath: string, read: (fd: number) => T | null): T | null {
+function _withOpenTranscriptFd<T>(filePath: string, read: (fd: number) => T | null): T | null {
   let fd: number | null = null;
   try {
     fd = fs.openSync(filePath, "r");
@@ -455,33 +531,20 @@ export function readFirstUserMessageFromTranscript(
   agentId?: string,
   opts?: { includeInterSession?: boolean },
 ): string | null {
-  const filePath = findExistingTranscriptPath(sessionId, storePath, sessionFile, agentId);
-  if (!filePath) {
+  const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
+
+  const content = readVaultSessionContent(candidates);
+  if (!content) {
     return null;
   }
-
-  return withOpenTranscriptFd(filePath, (fd) => {
-    const chunk = readTranscriptHeadChunk(fd);
-    if (!chunk) {
-      return null;
-    }
-    return extractFirstUserMessageFromTranscriptChunk(chunk, opts);
-  });
+  const headChunk = content.slice(0, 8192);
+  return extractFirstUserMessageFromTranscriptChunk(headChunk, opts);
 }
 
 const LAST_MSG_MAX_BYTES = 16384;
 const LAST_MSG_MAX_LINES = 20;
 
-function readLastMessagePreviewFromOpenTranscript(params: {
-  fd: number;
-  size: number;
-}): string | null {
-  const readStart = Math.max(0, params.size - LAST_MSG_MAX_BYTES);
-  const readLen = Math.min(params.size, LAST_MSG_MAX_BYTES);
-  const buf = Buffer.alloc(readLen);
-  fs.readSync(params.fd, buf, 0, readLen, readStart);
-
-  const chunk = buf.toString("utf-8");
+function extractLastMessagePreviewFromChunk(chunk: string): string | null {
   const lines = chunk.split(/\r?\n/).filter((l) => l.trim());
   const tailLines = lines.slice(-LAST_MSG_MAX_LINES);
 
@@ -504,28 +567,35 @@ function readLastMessagePreviewFromOpenTranscript(params: {
   return null;
 }
 
+function _readLastMessagePreviewFromOpenTranscript(params: {
+  fd: number;
+  size: number;
+}): string | null {
+  const readStart = Math.max(0, params.size - LAST_MSG_MAX_BYTES);
+  const readLen = Math.min(params.size, LAST_MSG_MAX_BYTES);
+  const buf = Buffer.alloc(readLen);
+  fs.readSync(params.fd, buf, 0, readLen, readStart);
+
+  return extractLastMessagePreviewFromChunk(buf.toString("utf-8"));
+}
+
 export function readLastMessagePreviewFromTranscript(
   sessionId: string,
   storePath: string | undefined,
   sessionFile?: string,
   agentId?: string,
 ): string | null {
-  const filePath = findExistingTranscriptPath(sessionId, storePath, sessionFile, agentId);
-  if (!filePath) {
+  const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
+
+  const content = readVaultSessionContent(candidates);
+  if (!content) {
     return null;
   }
-
-  return withOpenTranscriptFd(filePath, (fd) => {
-    const stat = fs.fstatSync(fd);
-    const size = stat.size;
-    if (size === 0) {
-      return null;
-    }
-    return readLastMessagePreviewFromOpenTranscript({ fd, size });
-  });
+  const tailChunk = content.slice(-LAST_MSG_MAX_BYTES);
+  return extractLastMessagePreviewFromChunk(tailChunk);
 }
 
-const PREVIEW_READ_SIZES = [64 * 1024, 256 * 1024, 1024 * 1024];
+const _PREVIEW_READ_SIZES = [64 * 1024, 256 * 1024, 1024 * 1024];
 const PREVIEW_MAX_LINES = 200;
 
 type TranscriptContentEntry = {
@@ -656,7 +726,7 @@ function buildPreviewItems(
   return items.slice(-maxItems);
 }
 
-function readRecentMessagesFromTranscript(
+function _readRecentMessagesFromTranscript(
   filePath: string,
   maxMessages: number,
   readBytes: number,
@@ -705,6 +775,32 @@ function readRecentMessagesFromTranscript(
   }
 }
 
+function extractRecentMessagesFromContent(
+  content: string,
+  maxMessages: number,
+): TranscriptPreviewMessage[] {
+  const lines = content.split(/\r?\n/).filter((l) => l.trim());
+  const tailLines = lines.slice(-PREVIEW_MAX_LINES);
+
+  const collected: TranscriptPreviewMessage[] = [];
+  for (let i = tailLines.length - 1; i >= 0; i--) {
+    const line = tailLines[i];
+    try {
+      const parsed = JSON.parse(line);
+      const msg = parsed?.message as TranscriptPreviewMessage | undefined;
+      if (msg && typeof msg === "object") {
+        collected.push(msg);
+        if (collected.length >= maxMessages) {
+          break;
+        }
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return collected.toReversed();
+}
+
 export function readSessionPreviewItemsFromTranscript(
   sessionId: string,
   storePath: string | undefined,
@@ -714,20 +810,14 @@ export function readSessionPreviewItemsFromTranscript(
   maxChars: number,
 ): SessionPreviewItem[] {
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-  const filePath = candidates.find((p) => fs.existsSync(p));
-  if (!filePath) {
-    return [];
-  }
 
   const boundedItems = Math.max(1, Math.min(maxItems, 50));
   const boundedChars = Math.max(20, Math.min(maxChars, 2000));
 
-  for (const readSize of PREVIEW_READ_SIZES) {
-    const messages = readRecentMessagesFromTranscript(filePath, boundedItems, readSize);
-    if (messages.length > 0 || readSize === PREVIEW_READ_SIZES[PREVIEW_READ_SIZES.length - 1]) {
-      return buildPreviewItems(messages, boundedItems, boundedChars);
-    }
+  const content = readVaultSessionContent(candidates);
+  if (!content) {
+    return [];
   }
-
-  return [];
+  const messages = extractRecentMessagesFromContent(content, boundedItems);
+  return buildPreviewItems(messages, boundedItems, boundedChars);
 }

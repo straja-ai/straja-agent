@@ -3,12 +3,20 @@ import os from "node:os";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
-import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
+import {
+  createAgentSession,
+  migrateSessionEntries,
+  parseSessionEntries,
+  SessionManager,
+  SettingsManager,
+} from "@mariozechner/pi-coding-agent";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
+import { flushPluginSetup } from "../../../plugins/registry.js";
+import { getActivePluginRegistry } from "../../../plugins/runtime.js";
 import {
   isCronSessionKey,
   isSubagentSessionKey,
@@ -511,6 +519,26 @@ export async function runEmbeddedAttempt(
       });
 
       await prewarmSessionFile(params.sessionFile);
+
+      // Invoke any session patch callback registered by plugins on globalThis.
+      // Plugins loaded by Jiti can't access the bundle's SessionManager directly
+      // (Jiti's import() proxy creates separate module instances), so we pass
+      // the real SessionManager, parseSessionEntries, and migrateSessionEntries
+      // to the callback here.
+      const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
+      const g = globalThis as Record<symbol, unknown>;
+      if (typeof g[SESSION_PATCH_KEY] === "function") {
+        g[SESSION_PATCH_KEY](SessionManager, parseSessionEntries, migrateSessionEntries);
+        delete g[SESSION_PATCH_KEY];
+        log.info("Applied session persistence patch from plugin");
+      }
+
+      // Flush any async plugin setup promises.
+      const pluginRegistry = getActivePluginRegistry();
+      if (pluginRegistry) {
+        await flushPluginSetup(pluginRegistry);
+      }
+
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
