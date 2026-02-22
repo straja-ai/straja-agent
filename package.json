@@ -1,20 +1,21 @@
 {
-  "name": "openclaw",
+  "name": "straja-agent",
   "version": "2026.2.20",
-  "description": "Multi-channel AI gateway with extensible messaging integrations",
+  "description": "Vault-first AI agent runtime — multi-channel gateway with sandboxed execution",
   "keywords": [],
-  "homepage": "https://github.com/openclaw/openclaw#readme",
+  "homepage": "https://github.com/straja-ai/straja-agent#readme",
   "bugs": {
-    "url": "https://github.com/openclaw/openclaw/issues"
+    "url": "https://github.com/straja-ai/straja-agent/issues"
   },
   "license": "MIT",
   "author": "",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openclaw/openclaw.git"
+    "url": "git+https://github.com/straja-ai/straja-agent.git"
   },
   "bin": {
-    "openclaw": "openclaw.mjs"
+    "openclaw": "straja-agent.mjs",
+    "straja-agent": "straja-agent.mjs"
   },
   "directories": {
     "doc": "docs",
@@ -23,7 +24,7 @@
   "files": [
     "CHANGELOG.md",
     "LICENSE",
-    "openclaw.mjs",
+    "straja-agent.mjs",
     "README-header.png",
     "README.md",
     "assets/",
@@ -44,7 +45,7 @@
       "types": "./dist/plugin-sdk/account-id.d.ts",
       "default": "./dist/plugin-sdk/account-id.js"
     },
-    "./cli-entry": "./openclaw.mjs"
+    "./cli-entry": "./straja-agent.mjs"
   },
   "scripts": {
     "android:assemble": "cd apps/android && ./gradlew :app:assembleDebug",
@@ -87,8 +88,6 @@
     "mac:package": "bash scripts/package-mac-app.sh",
     "mac:restart": "bash scripts/restart-mac.sh",
     "moltbot:rpc": "node scripts/run-node.mjs agent --mode rpc --json",
-    "openclaw": "node scripts/run-node.mjs",
-    "openclaw:rpc": "node scripts/run-node.mjs agent --mode rpc --json",
     "plugins:sync": "node --import tsx scripts/sync-plugin-versions.ts",
     "prepack": "pnpm build && pnpm ui:build",
     "prepare": "command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath git-hooks || exit 0",
@@ -97,6 +96,8 @@
     "protocol:gen:swift": "node --import tsx scripts/protocol-gen-swift.ts",
     "release:check": "node --import tsx scripts/release-check.ts",
     "start": "node scripts/run-node.mjs",
+    "straja-agent": "node scripts/run-node.mjs",
+    "straja-agent:rpc": "node scripts/run-node.mjs agent --mode rpc --json",
     "test": "node scripts/test-parallel.mjs",
     "test:all": "pnpm lint && pnpm build && pnpm test && pnpm test:e2e && pnpm test:live && pnpm test:docker:all",
     "test:coverage": "vitest run --config vitest.unit.config.ts --coverage",

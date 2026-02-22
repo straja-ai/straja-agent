@@ -20,7 +20,10 @@
     "paths": {
       "openclaw/plugin-sdk": ["./src/plugin-sdk/index.ts"],
       "openclaw/plugin-sdk/*": ["./src/plugin-sdk/*.ts"],
-      "openclaw/plugin-sdk/account-id": ["./src/plugin-sdk/account-id.ts"]
+      "openclaw/plugin-sdk/account-id": ["./src/plugin-sdk/account-id.ts"],
+      "straja-agent/plugin-sdk": ["./src/plugin-sdk/index.ts"],
+      "straja-agent/plugin-sdk/*": ["./src/plugin-sdk/*.ts"],
+      "straja-agent/plugin-sdk/account-id": ["./src/plugin-sdk/account-id.ts"]
     }
   },
   "include": ["src/**/*", "ui/**/*", "extensions/**/*"],
