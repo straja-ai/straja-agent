@@ -31,7 +31,7 @@ export const DEFAULT_TOOL_DENY = [
   "browser",
   "canvas",
   "nodes",
-  "cron",
+  "vault_cron",
   "gateway",
   ...CHANNEL_IDS,
 ] as const;

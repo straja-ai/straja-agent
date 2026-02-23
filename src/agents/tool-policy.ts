@@ -32,7 +32,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   // UI helpers
   "group:ui": ["browser", "canvas"],
   // Automation + infra
-  "group:automation": ["cron", "gateway"],
+  "group:automation": ["vault_cron", "gateway"],
   // Messaging surface
   "group:messaging": ["message"],
   // Nodes + device tools
@@ -42,7 +42,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "browser",
     "canvas",
     "nodes",
-    "cron",
+    "vault_cron",
     "message",
     "gateway",
     "agents_list",
@@ -60,7 +60,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   ],
 };
 
-const OWNER_ONLY_TOOL_NAME_FALLBACKS = new Set<string>(["whatsapp_login", "cron", "gateway"]);
+const OWNER_ONLY_TOOL_NAME_FALLBACKS = new Set<string>(["whatsapp_login", "vault_cron", "gateway"]);
 
 const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
   minimal: {

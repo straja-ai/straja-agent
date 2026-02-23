@@ -8,6 +8,26 @@ import type { CronStoreFile } from "./types.js";
 export const DEFAULT_CRON_DIR = path.join(CONFIG_DIR, "cron");
 export const DEFAULT_CRON_STORE_PATH = path.join(DEFAULT_CRON_DIR, "jobs.json");
 
+// ---------------------------------------------------------------------------
+// Vault patch bridge — when the straja-vault plugin is loaded, cron storage
+// is routed through the vault HTTP API instead of the local filesystem.
+// ---------------------------------------------------------------------------
+
+const CRON_STORE_PATCH_KEY = Symbol.for("openclaw.cronStorePatchCallback");
+
+type CronStorePatchOps = {
+  loadCronStore: (storePath: string) => Promise<CronStoreFile>;
+  saveCronStore: (storePath: string, store: CronStoreFile) => Promise<void>;
+};
+
+function resolveVaultCronStoreOps(): CronStorePatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[CRON_STORE_PATCH_KEY] as (() => CronStorePatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 export function resolveCronStorePath(storePath?: string) {
   if (storePath?.trim()) {
     const raw = storePath.trim();
@@ -20,6 +40,13 @@ export function resolveCronStorePath(storePath?: string) {
 }
 
 export async function loadCronStore(storePath: string): Promise<CronStoreFile> {
+  // Vault override: if the straja-vault plugin registered a cron store patch,
+  // delegate to the vault-backed implementation.
+  const vaultOps = resolveVaultCronStoreOps();
+  if (vaultOps) {
+    return vaultOps.loadCronStore(storePath);
+  }
+
   try {
     const raw = await fs.promises.readFile(storePath, "utf-8");
     let parsed: unknown;
@@ -48,6 +75,13 @@ export async function loadCronStore(storePath: string): Promise<CronStoreFile> {
 }
 
 export async function saveCronStore(storePath: string, store: CronStoreFile) {
+  // Vault override: if the straja-vault plugin registered a cron store patch,
+  // delegate to the vault-backed implementation.
+  const vaultOps = resolveVaultCronStoreOps();
+  if (vaultOps) {
+    return vaultOps.saveCronStore(storePath, store);
+  }
+
   await fs.promises.mkdir(path.dirname(storePath), { recursive: true });
   const { randomBytes } = await import("node:crypto");
   const tmp = `${storePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;

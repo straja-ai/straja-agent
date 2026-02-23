@@ -22,6 +22,33 @@ export function resolveCronRunLogPath(params: { storePath: string; jobId: string
   return path.join(dir, "runs", `${params.jobId}.jsonl`);
 }
 
+// ---------------------------------------------------------------------------
+// Vault patch bridge — when the straja-vault plugin is loaded, run-log
+// storage is routed through the vault HTTP API instead of the filesystem.
+// ---------------------------------------------------------------------------
+
+const CRON_STORE_PATCH_KEY = Symbol.for("openclaw.cronStorePatchCallback");
+
+type CronRunLogPatchOps = {
+  appendCronRunLog: (
+    filePath: string,
+    entry: CronRunLogEntry,
+    opts?: { maxBytes?: number; keepLines?: number },
+  ) => Promise<void>;
+  readCronRunLogEntries: (
+    filePath: string,
+    opts?: { limit?: number; jobId?: string },
+  ) => Promise<CronRunLogEntry[]>;
+};
+
+function resolveVaultRunLogOps(): CronRunLogPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[CRON_STORE_PATCH_KEY] as (() => CronRunLogPatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 const writesByPath = new Map<string, Promise<void>>();
 
 async function pruneIfNeeded(filePath: string, opts: { maxBytes: number; keepLines: number }) {
@@ -47,6 +74,13 @@ export async function appendCronRunLog(
   entry: CronRunLogEntry,
   opts?: { maxBytes?: number; keepLines?: number },
 ) {
+  // Vault override: if the straja-vault plugin registered a cron store patch,
+  // delegate to the vault-backed implementation.
+  const vaultOps = resolveVaultRunLogOps();
+  if (vaultOps) {
+    return vaultOps.appendCronRunLog(filePath, entry, opts);
+  }
+
   const resolved = path.resolve(filePath);
   const prev = writesByPath.get(resolved) ?? Promise.resolve();
   const next = prev
@@ -67,6 +101,13 @@ export async function readCronRunLogEntries(
   filePath: string,
   opts?: { limit?: number; jobId?: string },
 ): Promise<CronRunLogEntry[]> {
+  // Vault override: if the straja-vault plugin registered a cron store patch,
+  // delegate to the vault-backed implementation.
+  const vaultOps = resolveVaultRunLogOps();
+  if (vaultOps) {
+    return vaultOps.readCronRunLogEntries(filePath, opts);
+  }
+
   const limit = Math.max(1, Math.min(5000, Math.floor(opts?.limit ?? 200)));
   const jobId = opts?.jobId?.trim() || undefined;
   const raw = await fs.readFile(path.resolve(filePath), "utf-8").catch(() => "");

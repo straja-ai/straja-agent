@@ -338,8 +338,8 @@ export async function handleToolExecutionEnd(
     }
   }
 
-  // Track committed reminders only when cron.add completed successfully.
-  if (!isToolError && toolName === "cron" && isCronAddAction(startData?.args)) {
+  // Track committed reminders only when vault_cron.add completed successfully.
+  if (!isToolError && toolName === "vault_cron" && isCronAddAction(startData?.args)) {
     ctx.state.successfulCronAdds += 1;
   }
 

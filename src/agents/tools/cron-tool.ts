@@ -207,8 +207,8 @@ function inferDeliveryFromSessionKey(agentSessionKey?: string): CronDelivery | n
 export function createCronTool(opts?: CronToolOptions, deps?: CronToolDeps): AnyAgentTool {
   const callGateway = deps?.callGatewayTool ?? callGatewayTool;
   return {
-    label: "Cron",
-    name: "cron",
+    label: "Vault Cron",
+    name: "vault_cron",
     ownerOnly: true,
     description: `Manage Gateway cron jobs (status/list/add/update/remove/run/runs) and send wake events.
 

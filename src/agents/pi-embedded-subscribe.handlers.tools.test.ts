@@ -97,7 +97,7 @@ describe("handleToolExecutionEnd cron.add commitment tracking", () => {
       ctx as never,
       {
         type: "tool_execution_start",
-        toolName: "cron",
+        toolName: "vault_cron",
         toolCallId: "tool-cron-1",
         args: { action: "add", job: { name: "reminder" } },
       } as never,
@@ -107,7 +107,7 @@ describe("handleToolExecutionEnd cron.add commitment tracking", () => {
       ctx as never,
       {
         type: "tool_execution_end",
-        toolName: "cron",
+        toolName: "vault_cron",
         toolCallId: "tool-cron-1",
         isError: false,
         result: { details: { status: "ok" } },
@@ -123,7 +123,7 @@ describe("handleToolExecutionEnd cron.add commitment tracking", () => {
       ctx as never,
       {
         type: "tool_execution_start",
-        toolName: "cron",
+        toolName: "vault_cron",
         toolCallId: "tool-cron-2",
         args: { action: "add", job: { name: "reminder" } },
       } as never,
@@ -133,7 +133,7 @@ describe("handleToolExecutionEnd cron.add commitment tracking", () => {
       ctx as never,
       {
         type: "tool_execution_end",
-        toolName: "cron",
+        toolName: "vault_cron",
         toolCallId: "tool-cron-2",
         isError: true,
         result: { details: { status: "error" } },

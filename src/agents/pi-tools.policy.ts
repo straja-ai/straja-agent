@@ -49,7 +49,7 @@ const SUBAGENT_TOOL_DENY_ALWAYS = [
   "whatsapp_login",
   // Status/scheduling - main agent coordinates
   "session_status",
-  "cron",
+  "vault_cron",
   // Memory - pass relevant info in spawn prompt instead
   "memory_search",
   "memory_get",

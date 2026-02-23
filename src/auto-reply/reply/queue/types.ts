@@ -55,6 +55,8 @@ export type FollowupRun = {
     senderName?: string;
     senderUsername?: string;
     senderE164?: string;
+    /** Whether the sender is an owner (required for owner-only tools). */
+    senderIsOwner?: boolean;
     sessionFile: string;
     workspaceDir: string;
     config: OpenClawConfig;

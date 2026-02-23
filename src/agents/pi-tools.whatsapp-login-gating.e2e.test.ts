@@ -19,7 +19,7 @@ describe("owner-only tool gating", () => {
     const tools = createOpenClawCodingTools({ senderIsOwner: false });
     const toolNames = tools.map((tool) => tool.name);
     expect(toolNames).not.toContain("whatsapp_login");
-    expect(toolNames).not.toContain("cron");
+    expect(toolNames).not.toContain("vault_cron");
     expect(toolNames).not.toContain("gateway");
   });
 
@@ -27,7 +27,7 @@ describe("owner-only tool gating", () => {
     const tools = createOpenClawCodingTools({ senderIsOwner: true });
     const toolNames = tools.map((tool) => tool.name);
     expect(toolNames).toContain("whatsapp_login");
-    expect(toolNames).toContain("cron");
+    expect(toolNames).toContain("vault_cron");
     expect(toolNames).toContain("gateway");
   });
 
@@ -35,7 +35,7 @@ describe("owner-only tool gating", () => {
     const tools = createOpenClawCodingTools();
     const toolNames = tools.map((tool) => tool.name);
     expect(toolNames).not.toContain("whatsapp_login");
-    expect(toolNames).not.toContain("cron");
+    expect(toolNames).not.toContain("vault_cron");
     expect(toolNames).not.toContain("gateway");
   });
 });

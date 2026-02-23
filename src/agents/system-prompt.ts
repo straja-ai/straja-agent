@@ -282,7 +282,7 @@ export function buildAgentSystemPrompt(params: {
     "browser",
     "canvas",
     "nodes",
-    "cron",
+    "vault_cron",
     "message",
     "gateway",
     "agents_list",

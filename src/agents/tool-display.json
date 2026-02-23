@@ -143,9 +143,9 @@
         }
       }
     },
-    "cron": {
+    "vault_cron": {
       "emoji": "⏰",
-      "title": "Cron",
+      "title": "Vault Cron",
       "actions": {
         "status": { "label": "status" },
         "list": { "label": "list" },
