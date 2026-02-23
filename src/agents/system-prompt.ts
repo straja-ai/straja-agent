@@ -61,6 +61,7 @@ function buildMemorySection(params: {
   const writeTool = params.availableTools.has("vault_memory_write")
     ? "vault_memory_write"
     : "memory_write";
+  const hasVaultSearch = params.availableTools.has("vault_search");
   const lines = [
     "## Memory Recall",
     `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first. If low confidence after search, say you checked.`,
@@ -68,6 +69,15 @@ function buildMemorySection(params: {
     "## Memory Persistence",
     `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
   ];
+  if (hasVaultSearch) {
+    lines.push(
+      "",
+      "## Vault Knowledge Search",
+      "You have access to a document vault containing imported emails, documents, books, and other data sources.",
+      "When the user asks about information that could be in their documents or emails (events, schedules, receipts, newsletters, correspondence, etc.), use vault_search to find relevant content. Then use vault_get to read the full document if needed.",
+      "Prefer vault_search over external tools (web search, exec, etc.) when the answer is likely in the user's own data.",
+    );
+  }
   if (params.citationsMode === "off") {
     lines.push(
       "Citations are disabled: do not mention file paths or line numbers in replies unless the user explicitly asks.",
