@@ -168,6 +168,114 @@ export const GmailUpdateDraftSchema = Type.Object({
   ),
 });
 
+// ---------------------------------------------------------------------------
+// Calendar Event Schemas
+// ---------------------------------------------------------------------------
+
+export const CalendarCreateEventSchema = Type.Object({
+  calendarId: Type.Optional(
+    Type.String({
+      description:
+        'Google Calendar ID to create the event in. Defaults to "primary". ' +
+        "Use the calendar_id from synced event documents to target a specific calendar.",
+      default: "primary",
+    }),
+  ),
+  summary: Type.String({
+    description: "Event title / summary.",
+  }),
+  description: Type.Optional(
+    Type.String({
+      description: "Event description or notes.",
+    }),
+  ),
+  start: Type.String({
+    description:
+      "Start time in ISO 8601 format (e.g. '2025-03-01T10:00:00+02:00') or date-only for all-day events ('2025-03-01').",
+  }),
+  end: Type.String({
+    description:
+      "End time in ISO 8601 format (e.g. '2025-03-01T11:00:00+02:00') or date-only for all-day events ('2025-03-02').",
+  }),
+  location: Type.Optional(
+    Type.String({
+      description: "Event location.",
+    }),
+  ),
+  attendees: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Email addresses of attendees to invite.",
+    }),
+  ),
+  timeZone: Type.Optional(
+    Type.String({
+      description:
+        "IANA time zone for the event (e.g. 'Europe/Bucharest'). If omitted, uses the calendar's default.",
+    }),
+  ),
+});
+
+export const CalendarUpdateEventSchema = Type.Object({
+  calendarId: Type.Optional(
+    Type.String({
+      description: 'Google Calendar ID containing the event. Defaults to "primary".',
+      default: "primary",
+    }),
+  ),
+  eventId: Type.String({
+    description:
+      "The Google Calendar event ID to update (from the event_id field in vault calendar documents).",
+  }),
+  summary: Type.Optional(
+    Type.String({
+      description: "Updated event title.",
+    }),
+  ),
+  description: Type.Optional(
+    Type.String({
+      description: "Updated event description.",
+    }),
+  ),
+  start: Type.Optional(
+    Type.String({
+      description: "Updated start time in ISO 8601 format.",
+    }),
+  ),
+  end: Type.Optional(
+    Type.String({
+      description: "Updated end time in ISO 8601 format.",
+    }),
+  ),
+  location: Type.Optional(
+    Type.String({
+      description: "Updated event location.",
+    }),
+  ),
+  attendees: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Updated list of attendee email addresses.",
+    }),
+  ),
+  timeZone: Type.Optional(
+    Type.String({
+      description: "IANA time zone for the event.",
+    }),
+  ),
+});
+
+export const CalendarDeleteEventSchema = Type.Object({
+  calendarId: Type.Optional(
+    Type.String({
+      description: 'Google Calendar ID containing the event. Defaults to "primary".',
+      default: "primary",
+    }),
+  ),
+  eventId: Type.String({
+    description:
+      "The Google Calendar event ID to delete (from the event_id field in vault calendar documents).",
+  }),
+});
+
 export const VaultExecSchema = Type.Object({
   command: Type.String({
     description:
@@ -1192,6 +1300,218 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // -- vault_gcalendar_create_event -------------------------------------------
+  const vaultCalendarCreateEvent: AnyAgentTool = {
+    name: "vault_gcalendar_create_event",
+    label: "Calendar Create Event",
+    description:
+      "Create a new event on the user's Google Calendar. " +
+      "Specify start/end as ISO 8601 datetime for timed events, or date-only (YYYY-MM-DD) for all-day events. " +
+      "Returns the created event ID and link. Only works when Google Calendar is connected.",
+    parameters: CalendarCreateEventSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const summary = String(params.summary || "").trim();
+      const start = String(params.start || "").trim();
+      const end = String(params.end || "").trim();
+
+      if (!summary) {
+        return {
+          content: [{ type: "text" as const, text: "Error: 'summary' (event title) is required." }],
+        };
+      }
+      if (!start || !end) {
+        return {
+          content: [{ type: "text" as const, text: "Error: 'start' and 'end' are required." }],
+        };
+      }
+
+      const payload: Record<string, unknown> = {
+        calendarId: String(params.calendarId || "primary"),
+        summary,
+        start,
+        end,
+      };
+      if (params.description) payload.description = String(params.description);
+      if (params.location) payload.location = String(params.location);
+      if (params.timeZone) payload.timeZone = String(params.timeZone);
+      if (Array.isArray(params.attendees)) payload.attendees = params.attendees;
+
+      try {
+        const resp = await fetch(`${baseUrl}/connections/gcalendar/events`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Calendar event creation error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          id: string;
+          calendarId: string;
+          htmlLink?: string;
+          summary: string;
+          start: string;
+          end: string;
+        };
+
+        const text =
+          `Event created successfully.\n` +
+          `Event ID: ${data.id}\n` +
+          `Title: ${data.summary}\n` +
+          `Start: ${data.start}\n` +
+          `End: ${data.end}\n` +
+          (data.htmlLink ? `Link: ${data.htmlLink}\n` : "");
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_gcalendar_update_event -------------------------------------------
+  const vaultCalendarUpdateEvent: AnyAgentTool = {
+    name: "vault_gcalendar_update_event",
+    label: "Calendar Update Event",
+    description:
+      "Update an existing Google Calendar event. Use the event_id from vault calendar documents. " +
+      "Only include the fields you want to change.",
+    parameters: CalendarUpdateEventSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const eventId = String(params.eventId || "").trim();
+      if (!eventId) {
+        return { content: [{ type: "text" as const, text: "Error: 'eventId' is required." }] };
+      }
+
+      const payload: Record<string, unknown> = {
+        calendarId: String(params.calendarId || "primary"),
+      };
+      if (params.summary !== undefined) payload.summary = String(params.summary);
+      if (params.description !== undefined) payload.description = String(params.description);
+      if (params.start !== undefined) payload.start = String(params.start);
+      if (params.end !== undefined) payload.end = String(params.end);
+      if (params.location !== undefined) payload.location = String(params.location);
+      if (params.timeZone !== undefined) payload.timeZone = String(params.timeZone);
+      if (Array.isArray(params.attendees)) payload.attendees = params.attendees;
+
+      try {
+        const resp = await fetch(
+          `${baseUrl}/connections/gcalendar/events/${encodeURIComponent(eventId)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal,
+          },
+        );
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Calendar event update error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          id: string;
+          calendarId: string;
+          htmlLink?: string;
+          summary: string;
+          start: string;
+          end: string;
+        };
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Event updated successfully.\nEvent ID: ${data.id}\nTitle: ${data.summary}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_gcalendar_delete_event -------------------------------------------
+  const vaultCalendarDeleteEvent: AnyAgentTool = {
+    name: "vault_gcalendar_delete_event",
+    label: "Calendar Delete Event",
+    description:
+      "Delete an event from Google Calendar. Use the event_id from vault calendar documents. " +
+      "This permanently removes the event from the calendar.",
+    parameters: CalendarDeleteEventSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const eventId = String(params.eventId || "").trim();
+      if (!eventId) {
+        return { content: [{ type: "text" as const, text: "Error: 'eventId' is required." }] };
+      }
+
+      const calendarId = String(params.calendarId || "primary");
+
+      try {
+        const resp = await fetch(
+          `${baseUrl}/connections/gcalendar/events/${encodeURIComponent(eventId)}?calendarId=${encodeURIComponent(calendarId)}`,
+          {
+            method: "DELETE",
+            signal,
+          },
+        );
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Calendar event deletion error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Event ${eventId} deleted successfully from calendar ${calendarId}.`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   return [
     vaultSearch,
     vaultGet,
@@ -1203,5 +1523,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultMemoryWrite,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
+    vaultCalendarCreateEvent,
+    vaultCalendarUpdateEvent,
+    vaultCalendarDeleteEvent,
   ];
 }
