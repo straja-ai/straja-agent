@@ -78,6 +78,21 @@ function buildMemorySection(params: {
       "Prefer vault_search over external tools (web search, exec, etc.) when the answer is likely in the user's own data.",
     );
   }
+  if (params.availableTools.has("vault_gmail_create_draft")) {
+    const hasUpdate = params.availableTools.has("vault_gmail_update_draft");
+    lines.push(
+      "",
+      "## Gmail Drafts",
+      "You can create Gmail draft emails using vault_gmail_create_draft. The draft is saved in the user's Gmail Drafts folder for them to review and send.",
+      ...(hasUpdate
+        ? [
+            "Use vault_gmail_update_draft to revise a draft if the user requests changes (pass the Draft ID from the create result).",
+          ]
+        : []),
+      "For replies to emails found in the vault: use the message_id field as inReplyTo and the thread_id field as threadId from the vault email document to correctly thread the reply.",
+      "Always confirm with the user before creating a draft. Never send emails directly — only create drafts.",
+    );
+  }
   if (params.citationsMode === "off") {
     lines.push(
       "Citations are disabled: do not mention file paths or line numbers in replies unless the user explicitly asks.",

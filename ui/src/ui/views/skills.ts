@@ -23,6 +23,8 @@ export type SkillsProps = {
   onEdit: (skillKey: string, value: string) => void;
   onSaveKey: (skillKey: string) => void;
   onInstall: (skillKey: string, name: string, installId: string) => void;
+  onDisableAll: () => void;
+  onEnableAll: () => void;
 };
 
 export function renderSkills(props: SkillsProps) {
@@ -42,9 +44,17 @@ export function renderSkills(props: SkillsProps) {
           <div class="card-title">Skills</div>
           <div class="card-sub">Bundled, managed, and workspace skills.</div>
         </div>
-        <button class="btn" ?disabled=${props.loading} @click=${props.onRefresh}>
-          ${props.loading ? "Loading…" : "Refresh"}
-        </button>
+        <div class="row" style="gap: 6px;">
+          <button class="btn" ?disabled=${props.loading || props.busyKey === "__bulk__"} @click=${props.onDisableAll}>
+            Disable All
+          </button>
+          <button class="btn" ?disabled=${props.loading || props.busyKey === "__bulk__"} @click=${props.onEnableAll}>
+            Enable All
+          </button>
+          <button class="btn" ?disabled=${props.loading} @click=${props.onRefresh}>
+            ${props.loading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
       </div>
 
       <div class="filters" style="margin-top: 14px;">

@@ -46,6 +46,7 @@ import { loadNodes } from "./controllers/nodes.ts";
 import { loadPresence } from "./controllers/presence.ts";
 import { deleteSessionAndRefresh, loadSessions, patchSession } from "./controllers/sessions.ts";
 import {
+  bulkUpdateSkillsEnabled,
   installSkill,
   loadSkills,
   saveSkillApiKey,
@@ -713,6 +714,8 @@ export function renderApp(state: AppViewState) {
                 onSaveKey: (key) => saveSkillApiKey(state, key),
                 onInstall: (skillKey, name, installId) =>
                   installSkill(state, skillKey, name, installId),
+                onDisableAll: () => bulkUpdateSkillsEnabled(state, false),
+                onEnableAll: () => bulkUpdateSkillsEnabled(state, true),
               })
             : nothing
         }

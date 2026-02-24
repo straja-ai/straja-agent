@@ -102,6 +102,72 @@ export const VaultMemoryWriteSchema = Type.Object({
   ),
 });
 
+// ---------------------------------------------------------------------------
+// Gmail Draft Schema
+// ---------------------------------------------------------------------------
+
+export const GmailCreateDraftSchema = Type.Object({
+  to: Type.String({
+    description: "Recipient email address.",
+  }),
+  subject: Type.String({
+    description: "Email subject line.",
+  }),
+  body: Type.String({
+    description: "Plain-text email body.",
+  }),
+  inReplyTo: Type.Optional(
+    Type.String({
+      description:
+        "RFC 2822 Message-ID of the email being replied to (from the message_id field in vault email documents). " +
+        "Setting this threads the draft as a reply in Gmail.",
+    }),
+  ),
+  references: Type.Optional(
+    Type.String({
+      description: "References header chain for threading replies.",
+    }),
+  ),
+  threadId: Type.Optional(
+    Type.String({
+      description:
+        "Gmail thread ID to keep the draft in the same conversation thread (from the thread_id field in vault email documents).",
+    }),
+  ),
+});
+
+export const GmailUpdateDraftSchema = Type.Object({
+  draftId: Type.String({
+    description:
+      "The Gmail draft ID to update (returned by vault_gmail_create_draft as 'Draft ID').",
+  }),
+  to: Type.String({
+    description: "Recipient email address.",
+  }),
+  subject: Type.String({
+    description: "Email subject line.",
+  }),
+  body: Type.String({
+    description: "Plain-text email body.",
+  }),
+  inReplyTo: Type.Optional(
+    Type.String({
+      description:
+        "RFC 2822 Message-ID of the email being replied to (from the message_id field in vault email documents).",
+    }),
+  ),
+  references: Type.Optional(
+    Type.String({
+      description: "References header chain for threading replies.",
+    }),
+  ),
+  threadId: Type.Optional(
+    Type.String({
+      description: "Gmail thread ID to keep the draft in the same conversation thread.",
+    }),
+  ),
+});
+
 export const VaultExecSchema = Type.Object({
   command: Type.String({
     description:
@@ -969,6 +1035,163 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // -- vault_gmail_create_draft ------------------------------------------------
+  const vaultGmailCreateDraft: AnyAgentTool = {
+    name: "vault_gmail_create_draft",
+    label: "Gmail Create Draft",
+    description:
+      "Create a Gmail draft email in the user's connected Gmail account. " +
+      "The draft appears in Gmail's Drafts folder for the user to review and send. " +
+      "For replies: use inReplyTo (the message_id from the vault email document), " +
+      "references, and threadId (the thread_id from the vault email document) to thread the reply correctly. " +
+      "Returns a Draft ID that can be used with vault_gmail_update_draft to revise the draft. " +
+      "Only works when Gmail is connected with compose scope.",
+    parameters: GmailCreateDraftSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const to = String(params.to || "").trim();
+      const subject = String(params.subject || "").trim();
+      const body = String(params.body || "");
+
+      if (!to) {
+        return {
+          content: [{ type: "text" as const, text: "Error: 'to' (recipient email) is required." }],
+        };
+      }
+      if (!subject) {
+        return { content: [{ type: "text" as const, text: "Error: 'subject' is required." }] };
+      }
+      if (!body) {
+        return { content: [{ type: "text" as const, text: "Error: 'body' is required." }] };
+      }
+
+      const payload: Record<string, unknown> = { to, subject, body };
+      if (params.inReplyTo) payload.inReplyTo = String(params.inReplyTo);
+      if (params.references) payload.references = String(params.references);
+      if (params.threadId) payload.threadId = String(params.threadId);
+
+      try {
+        const resp = await fetch(`${baseUrl}/connections/gmail/drafts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Gmail draft error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          id: string;
+          message: { id: string; threadId: string };
+        };
+
+        const text =
+          `Draft created successfully.\n` +
+          `Draft ID: ${data.id}\n` +
+          `To: ${to}\n` +
+          `Subject: ${subject}\n` +
+          `The draft is now in the user's Gmail Drafts folder, ready for review and sending.`;
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_gmail_update_draft ------------------------------------------------
+  const vaultGmailUpdateDraft: AnyAgentTool = {
+    name: "vault_gmail_update_draft",
+    label: "Gmail Update Draft",
+    description:
+      "Update an existing Gmail draft. Replaces the draft's to, subject, and body. " +
+      "Use the Draft ID returned by vault_gmail_create_draft. " +
+      "Useful when the user wants to revise a draft before sending.",
+    parameters: GmailUpdateDraftSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const draftId = String(params.draftId || "").trim();
+      const to = String(params.to || "").trim();
+      const subject = String(params.subject || "").trim();
+      const body = String(params.body || "");
+
+      if (!draftId) {
+        return { content: [{ type: "text" as const, text: "Error: 'draftId' is required." }] };
+      }
+      if (!to) {
+        return {
+          content: [{ type: "text" as const, text: "Error: 'to' (recipient email) is required." }],
+        };
+      }
+      if (!subject) {
+        return { content: [{ type: "text" as const, text: "Error: 'subject' is required." }] };
+      }
+      if (!body) {
+        return { content: [{ type: "text" as const, text: "Error: 'body' is required." }] };
+      }
+
+      const payload: Record<string, unknown> = { to, subject, body };
+      if (params.inReplyTo) payload.inReplyTo = String(params.inReplyTo);
+      if (params.references) payload.references = String(params.references);
+      if (params.threadId) payload.threadId = String(params.threadId);
+
+      try {
+        const resp = await fetch(
+          `${baseUrl}/connections/gmail/drafts/${encodeURIComponent(draftId)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal,
+          },
+        );
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Gmail draft update error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          id: string;
+          message: { id: string; threadId: string };
+        };
+
+        const text =
+          `Draft updated successfully.\n` +
+          `Draft ID: ${data.id}\n` +
+          `To: ${to}\n` +
+          `Subject: ${subject}\n` +
+          `The updated draft is in the user's Gmail Drafts folder.`;
+
+        return {
+          content: [{ type: "text" as const, text }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   return [
     vaultSearch,
     vaultGet,
@@ -978,5 +1201,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultMemorySearch,
     vaultMemoryGet,
     vaultMemoryWrite,
+    vaultGmailCreateDraft,
+    vaultGmailUpdateDraft,
   ];
 }

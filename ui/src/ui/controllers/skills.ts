@@ -96,6 +96,29 @@ export async function updateSkillEnabled(state: SkillsState, skillKey: string, e
   }
 }
 
+export async function bulkUpdateSkillsEnabled(state: SkillsState, enabled: boolean) {
+  if (!state.client || !state.connected) {
+    return;
+  }
+  const skills = state.skillsReport?.skills ?? [];
+  const targets = skills.filter((s) => (enabled ? s.disabled : !s.disabled));
+  if (targets.length === 0) {
+    return;
+  }
+  state.skillsBusyKey = "__bulk__";
+  state.skillsError = null;
+  try {
+    for (const skill of targets) {
+      await state.client.request("skills.update", { skillKey: skill.skillKey, enabled });
+    }
+    await loadSkills(state);
+  } catch (err) {
+    state.skillsError = getErrorMessage(err);
+  } finally {
+    state.skillsBusyKey = null;
+  }
+}
+
 export async function saveSkillApiKey(state: SkillsState, skillKey: string) {
   if (!state.client || !state.connected) {
     return;
