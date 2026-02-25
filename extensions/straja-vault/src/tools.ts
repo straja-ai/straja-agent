@@ -276,6 +276,91 @@ export const CalendarDeleteEventSchema = Type.Object({
   }),
 });
 
+// ---------------------------------------------------------------------------
+// Browser Schemas
+// ---------------------------------------------------------------------------
+
+export const BrowserNavigateSchema = Type.Object({
+  url: Type.String({ description: "The URL to navigate to." }),
+});
+
+export const BrowserSnapshotSchema = Type.Object({});
+
+export const BrowserClickSchema = Type.Object({
+  element: Type.String({
+    description: "Human-readable description of the element to click (e.g. 'Submit button').",
+  }),
+  ref: Type.Optional(
+    Type.String({ description: "Exact element reference from a previous snapshot." }),
+  ),
+});
+
+export const BrowserTypeSchema = Type.Object({
+  element: Type.String({
+    description: "Human-readable description of the editable element to type into.",
+  }),
+  ref: Type.Optional(
+    Type.String({ description: "Exact element reference from a previous snapshot." }),
+  ),
+  text: Type.String({ description: "Text to type into the element." }),
+  submit: Type.Optional(
+    Type.Boolean({ description: "Press Enter after typing (default: false)." }),
+  ),
+});
+
+export const BrowserFillSchema = Type.Object({
+  element: Type.String({ description: "Human-readable description of the form field." }),
+  ref: Type.Optional(
+    Type.String({ description: "Exact element reference from a previous snapshot." }),
+  ),
+  value: Type.String({
+    description: "Value to fill into the field (clears existing content first).",
+  }),
+});
+
+export const BrowserSelectSchema = Type.Object({
+  element: Type.String({
+    description: "Human-readable description of the select/dropdown element.",
+  }),
+  ref: Type.Optional(
+    Type.String({ description: "Exact element reference from a previous snapshot." }),
+  ),
+  values: Type.Array(Type.String(), { description: "Option values to select." }),
+});
+
+export const BrowserHoverSchema = Type.Object({
+  element: Type.String({ description: "Human-readable description of the element to hover over." }),
+  ref: Type.Optional(
+    Type.String({ description: "Exact element reference from a previous snapshot." }),
+  ),
+});
+
+export const BrowserPressKeySchema = Type.Object({
+  key: Type.String({
+    description: "Key or key combination to press (e.g. 'Enter', 'Escape', 'Control+c').",
+  }),
+});
+
+export const BrowserScreenshotSchema = Type.Object({});
+
+export const BrowserTabListSchema = Type.Object({});
+
+export const BrowserTabNewSchema = Type.Object({
+  url: Type.Optional(Type.String({ description: "URL to open in the new tab." })),
+});
+
+export const BrowserTabCloseSchema = Type.Object({
+  index: Type.Optional(Type.Number({ description: "Tab index to close (0-based)." })),
+});
+
+export const BrowserConsoleSchema = Type.Object({});
+
+export const BrowserWaitSchema = Type.Object({
+  text: Type.String({ description: "Text to wait for on the page." }),
+  textGone: Type.Optional(Type.String({ description: "Text to wait for disappearance." })),
+  timeout: Type.Optional(Type.Number({ description: "Timeout in milliseconds (default: 30000)." })),
+});
+
 export const VaultExecSchema = Type.Object({
   command: Type.String({
     description:
@@ -1512,6 +1597,185 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // ---------------------------------------------------------------------------
+  // Browser tools — proxy to vault's playwright-mcp browser service
+  // ---------------------------------------------------------------------------
+
+  /** Helper: call a vault browser tool via the HTTP proxy endpoint */
+  async function callBrowserTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<{
+    content: Array<{ type: "text" | "image"; text?: string; data?: string; mimeType?: string }>;
+  }> {
+    try {
+      const resp = await fetch(`${baseUrl}/connections/browser/tool`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: toolName, arguments: args }),
+        signal,
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return {
+          content: [{ type: "text" as const, text: `Browser error (${resp.status}): ${errText}` }],
+        };
+      }
+      const data = await resp.json();
+      return data as any;
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Browser connection error: ${String(err)}` }],
+      };
+    }
+  }
+
+  const vaultBrowserNavigate: AnyAgentTool = {
+    name: "vault_browser_navigate",
+    label: "Browser Navigate",
+    description: "Navigate the vault browser to a URL.",
+    parameters: BrowserNavigateSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_navigate", params, signal);
+    },
+  };
+
+  const vaultBrowserSnapshot: AnyAgentTool = {
+    name: "vault_browser_snapshot",
+    label: "Browser Snapshot",
+    description:
+      "Get an accessibility tree snapshot of the current page. " +
+      "Returns a structured text representation of all page elements with references " +
+      "you can use in click/type/fill actions.",
+    parameters: BrowserSnapshotSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_snapshot", params, signal);
+    },
+  };
+
+  const vaultBrowserClick: AnyAgentTool = {
+    name: "vault_browser_click",
+    label: "Browser Click",
+    description:
+      "Click an element on the page. Use 'ref' from a snapshot for precision, or describe the element.",
+    parameters: BrowserClickSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_click", params, signal);
+    },
+  };
+
+  const vaultBrowserType: AnyAgentTool = {
+    name: "vault_browser_type",
+    label: "Browser Type",
+    description:
+      "Type text into an editable element. Set submit: true to press Enter after typing.",
+    parameters: BrowserTypeSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_type", params, signal);
+    },
+  };
+
+  const vaultBrowserFill: AnyAgentTool = {
+    name: "vault_browser_fill",
+    label: "Browser Fill",
+    description: "Clear a form field and fill it with a new value.",
+    parameters: BrowserFillSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_fill", params, signal);
+    },
+  };
+
+  const vaultBrowserSelect: AnyAgentTool = {
+    name: "vault_browser_select",
+    label: "Browser Select",
+    description: "Select an option from a dropdown/select element.",
+    parameters: BrowserSelectSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_select_option", params, signal);
+    },
+  };
+
+  const vaultBrowserHover: AnyAgentTool = {
+    name: "vault_browser_hover",
+    label: "Browser Hover",
+    description: "Hover over an element to reveal tooltips or dropdown menus.",
+    parameters: BrowserHoverSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_hover", params, signal);
+    },
+  };
+
+  const vaultBrowserPressKey: AnyAgentTool = {
+    name: "vault_browser_press_key",
+    label: "Browser Press Key",
+    description: "Press a keyboard key or combination (e.g. Enter, Escape, Control+c, Tab).",
+    parameters: BrowserPressKeySchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_press_key", params, signal);
+    },
+  };
+
+  const vaultBrowserScreenshot: AnyAgentTool = {
+    name: "vault_browser_screenshot",
+    label: "Browser Screenshot",
+    description: "Take a screenshot of the current page. Returns a base64 PNG image.",
+    parameters: BrowserScreenshotSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_take_screenshot", params, signal);
+    },
+  };
+
+  const vaultBrowserTabList: AnyAgentTool = {
+    name: "vault_browser_tab_list",
+    label: "Browser Tab List",
+    description: "List all open browser tabs with their URLs and titles.",
+    parameters: BrowserTabListSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_tab_list", params, signal);
+    },
+  };
+
+  const vaultBrowserTabNew: AnyAgentTool = {
+    name: "vault_browser_tab_new",
+    label: "Browser New Tab",
+    description: "Open a new browser tab, optionally navigating to a URL.",
+    parameters: BrowserTabNewSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_tab_new", params, signal);
+    },
+  };
+
+  const vaultBrowserTabClose: AnyAgentTool = {
+    name: "vault_browser_tab_close",
+    label: "Browser Close Tab",
+    description: "Close a browser tab by index.",
+    parameters: BrowserTabCloseSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_tab_close", params, signal);
+    },
+  };
+
+  const vaultBrowserConsole: AnyAgentTool = {
+    name: "vault_browser_console",
+    label: "Browser Console",
+    description: "Get browser console messages (log, warn, error).",
+    parameters: BrowserConsoleSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_console_messages", params, signal);
+    },
+  };
+
+  const vaultBrowserWait: AnyAgentTool = {
+    name: "vault_browser_wait",
+    label: "Browser Wait",
+    description: "Wait for specific text to appear or disappear on the page.",
+    parameters: BrowserWaitSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_wait_for", params, signal);
+    },
+  };
+
   return [
     vaultSearch,
     vaultGet,
@@ -1526,5 +1790,19 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultCalendarCreateEvent,
     vaultCalendarUpdateEvent,
     vaultCalendarDeleteEvent,
+    vaultBrowserNavigate,
+    vaultBrowserSnapshot,
+    vaultBrowserClick,
+    vaultBrowserType,
+    vaultBrowserFill,
+    vaultBrowserSelect,
+    vaultBrowserHover,
+    vaultBrowserPressKey,
+    vaultBrowserScreenshot,
+    vaultBrowserTabList,
+    vaultBrowserTabNew,
+    vaultBrowserTabClose,
+    vaultBrowserConsole,
+    vaultBrowserWait,
   ];
 }
