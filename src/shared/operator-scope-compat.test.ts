@@ -26,12 +26,36 @@ describe("roleScopesAllow", () => {
     ).toBe(true);
   });
 
-  it("keeps non-read operator scopes explicit", () => {
+  it("treats operator.admin as super-scope that satisfies any operator scope", () => {
     expect(
       roleScopesAllow({
         role: "operator",
         requestedScopes: ["operator.write"],
         allowedScopes: ["operator.admin"],
+      }),
+    ).toBe(true);
+    expect(
+      roleScopesAllow({
+        role: "operator",
+        requestedScopes: ["operator.approvals"],
+        allowedScopes: ["operator.admin"],
+      }),
+    ).toBe(true);
+    expect(
+      roleScopesAllow({
+        role: "operator",
+        requestedScopes: ["operator.pairing"],
+        allowedScopes: ["operator.admin"],
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps non-admin operator scopes explicit", () => {
+    expect(
+      roleScopesAllow({
+        role: "operator",
+        requestedScopes: ["operator.write"],
+        allowedScopes: ["operator.read"],
       }),
     ).toBe(false);
   });
