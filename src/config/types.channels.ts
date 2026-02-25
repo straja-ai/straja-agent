@@ -22,6 +22,11 @@ export type ChannelDefaultsConfig = {
   groupPolicy?: GroupPolicy;
   /** Default heartbeat visibility for all channels. */
   heartbeat?: ChannelHeartbeatVisibilityConfig;
+  /**
+   * Narrow allowlist for outbound media URL fetches (e.g. Vault screenshot URLs).
+   * SSRF protections still apply to all other URLs.
+   */
+  mediaUrlAllowlistPrefixes?: string[];
 };
 
 /**

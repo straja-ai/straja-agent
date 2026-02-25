@@ -1,6 +1,7 @@
 import { type Bot, GrammyError, InputFile } from "grammy";
 import { chunkMarkdownTextWithMode, type ChunkMode } from "../../auto-reply/chunk.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
+import { loadConfig } from "../../config/config.js";
 import type { ReplyToMode } from "../../config/config.js";
 import type { MarkdownTableMode } from "../../config/types.base.js";
 import { danger, logVerbose, warn } from "../../globals.js";
@@ -55,6 +56,7 @@ export async function deliverReplies(params: {
   /** Optional quote text for Telegram reply_parameters. */
   replyQuoteText?: string;
 }): Promise<{ delivered: boolean }> {
+  const cfg = loadConfig();
   const {
     replies,
     chatId,
@@ -151,6 +153,7 @@ export async function deliverReplies(params: {
       const isFirstMedia = first;
       const media = await loadWebMedia(mediaUrl, {
         localRoots: params.mediaLocalRoots,
+        urlAllowlistPrefixes: cfg.channels?.defaults?.mediaUrlAllowlistPrefixes,
       });
       const kind = mediaKindFromMime(media.contentType ?? undefined);
       const isGif = isGifMedia({

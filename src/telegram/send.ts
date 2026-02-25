@@ -525,6 +525,7 @@ export async function sendMessageTelegram(
     const media = await loadWebMedia(mediaUrl, {
       maxBytes: opts.maxBytes,
       localRoots: opts.mediaLocalRoots,
+      urlAllowlistPrefixes: cfg.channels?.defaults?.mediaUrlAllowlistPrefixes,
     });
     const kind = mediaKindFromMime(media.contentType ?? undefined);
     const isGif = isGifMedia({

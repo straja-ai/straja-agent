@@ -389,12 +389,15 @@ export async function runAgentTurnWithFallback(params: {
                     toolResultChain = toolResultChain
                       .then(async () => {
                         const { text, skip } = normalizeStreamingText(payload);
-                        if (skip) {
+                        const hasMedia =
+                          Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
+                        if (skip && !hasMedia) {
                           return;
                         }
                         await params.typingSignals.signalTextDelta(text);
                         await onToolResult({
                           text,
+                          mediaUrl: payload.mediaUrl,
                           mediaUrls: payload.mediaUrls,
                         });
                       })

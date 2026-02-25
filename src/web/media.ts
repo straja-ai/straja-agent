@@ -27,6 +27,8 @@ type WebMediaOptions = {
   maxBytes?: number;
   optimizeImages?: boolean;
   ssrfPolicy?: SsrFPolicy;
+  /** Narrow per-request URL prefix allowlist; matched URLs get a hostname exception with redirects disabled. */
+  urlAllowlistPrefixes?: readonly string[];
   /** Allowed root directories for local path reads. "any" is deprecated; prefer sandboxValidated + readFile. */
   localRoots?: readonly string[] | "any";
   /** Caller already validated the local path (sandbox/other guards); requires readFile override. */
@@ -142,6 +144,87 @@ function isHeicSource(opts: { contentType?: string; fileName?: string }): boolea
   return false;
 }
 
+const VAULT_SCREENSHOT_FETCH_BASE_PATH = "/connections/browser/screenshots/file";
+const VAULT_SCREENSHOT_FETCH_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
+const VAULT_SCREENSHOT_FETCH_TOKEN_RE = /^[A-Fa-f0-9]{64}$/;
+
+type StrictMediaUrlAllowRule = {
+  protocol: "http:";
+  hostname: "127.0.0.1";
+  port: string;
+  basePath: typeof VAULT_SCREENSHOT_FETCH_BASE_PATH;
+};
+
+function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaUrlAllowRule[] {
+  if (!values || values.length === 0) {
+    return [];
+  }
+  const rules: StrictMediaUrlAllowRule[] = [];
+  for (const rawValue of values) {
+    const value = rawValue.trim();
+    if (!value) {
+      continue;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== "http:") {
+      continue;
+    }
+    if (parsed.hostname !== "127.0.0.1") {
+      continue;
+    }
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    if (normalizedPath !== VAULT_SCREENSHOT_FETCH_BASE_PATH) {
+      continue;
+    }
+    if (parsed.search || parsed.hash) {
+      continue;
+    }
+    rules.push({
+      protocol: "http:",
+      hostname: "127.0.0.1",
+      port: parsed.port || "80",
+      basePath: VAULT_SCREENSHOT_FETCH_BASE_PATH,
+    });
+  }
+  return rules;
+}
+
+function matchesStrictMediaUrlAllowRule(url: URL, rule: StrictMediaUrlAllowRule): boolean {
+  if (url.protocol !== rule.protocol) {
+    return false;
+  }
+  if (url.hostname !== rule.hostname) {
+    return false;
+  }
+  if ((url.port || "80") !== rule.port) {
+    return false;
+  }
+
+  const prefix = `${rule.basePath}/`;
+  if (!url.pathname.startsWith(prefix)) {
+    return false;
+  }
+  const opaqueId = url.pathname.slice(prefix.length);
+  if (!VAULT_SCREENSHOT_FETCH_ID_RE.test(opaqueId) || opaqueId.includes("/")) {
+    return false;
+  }
+
+  const params = url.searchParams;
+  if (params.size !== 1) {
+    return false;
+  }
+  const token = params.get("token");
+  if (!token || !VAULT_SCREENSHOT_FETCH_TOKEN_RE.test(token)) {
+    return false;
+  }
+  return true;
+}
+
 function toJpegFileName(fileName?: string): string | undefined {
   if (!fileName) {
     return undefined;
@@ -217,6 +300,7 @@ async function loadWebMediaInternal(
     maxBytes,
     optimizeImages = true,
     ssrfPolicy,
+    urlAllowlistPrefixes,
     localRoots,
     sandboxValidated = false,
     readFile: readFileOverride,
@@ -301,6 +385,36 @@ async function loadWebMediaInternal(
   };
 
   if (/^https?:\/\//i.test(mediaUrl)) {
+    const strictRules = parseStrictMediaUrlAllowRules(urlAllowlistPrefixes);
+    let parsedRemoteUrl: URL | null = null;
+    try {
+      parsedRemoteUrl = new URL(mediaUrl);
+    } catch {
+      parsedRemoteUrl = null;
+    }
+    const matchedRule = parsedRemoteUrl
+      ? strictRules.find((rule) => matchesStrictMediaUrlAllowRule(parsedRemoteUrl, rule))
+      : undefined;
+    let effectiveSsrfPolicy = ssrfPolicy;
+    let effectiveMaxRedirects: number | undefined;
+    if (matchedRule && parsedRemoteUrl) {
+      try {
+        const existing = ssrfPolicy?.allowedHostnames ?? [];
+        const mergedAllowedHostnames = Array.from(
+          new Set(
+            [...existing, parsedRemoteUrl.hostname].map((value) => value.trim()).filter(Boolean),
+          ),
+        );
+        effectiveSsrfPolicy = {
+          ...ssrfPolicy,
+          allowedHostnames: mergedAllowedHostnames,
+        };
+        // Prevent redirect-based widening after a strict local screenshot route match.
+        effectiveMaxRedirects = 0;
+      } catch {
+        // Let fetchRemoteMedia return the normal invalid URL error.
+      }
+    }
     // Enforce a download cap during fetch to avoid unbounded memory usage.
     // For optimized images, allow fetching larger payloads before compression.
     const defaultFetchCap = maxBytesForKind("unknown");
@@ -310,7 +424,12 @@ async function loadWebMediaInternal(
         : optimizeImages
           ? Math.max(maxBytes, defaultFetchCap)
           : maxBytes;
-    const fetched = await fetchRemoteMedia({ url: mediaUrl, maxBytes: fetchCap, ssrfPolicy });
+    const fetched = await fetchRemoteMedia({
+      url: mediaUrl,
+      maxBytes: fetchCap,
+      ssrfPolicy: effectiveSsrfPolicy,
+      ...(effectiveMaxRedirects !== undefined ? { maxRedirects: effectiveMaxRedirects } : {}),
+    });
     const { buffer, contentType, fileName } = fetched;
     const kind = mediaKindFromMime(contentType);
     return await clampAndFinalize({ buffer, contentType, kind, fileName });
@@ -383,13 +502,18 @@ async function loadWebMediaInternal(
 export async function loadWebMedia(
   mediaUrl: string,
   maxBytesOrOptions?: number | WebMediaOptions,
-  options?: { ssrfPolicy?: SsrFPolicy; localRoots?: readonly string[] | "any" },
+  options?: {
+    ssrfPolicy?: SsrFPolicy;
+    urlAllowlistPrefixes?: readonly string[];
+    localRoots?: readonly string[] | "any";
+  },
 ): Promise<WebMediaResult> {
   if (typeof maxBytesOrOptions === "number" || maxBytesOrOptions === undefined) {
     return await loadWebMediaInternal(mediaUrl, {
       maxBytes: maxBytesOrOptions,
       optimizeImages: true,
       ssrfPolicy: options?.ssrfPolicy,
+      urlAllowlistPrefixes: options?.urlAllowlistPrefixes,
       localRoots: options?.localRoots,
     });
   }
@@ -402,13 +526,18 @@ export async function loadWebMedia(
 export async function loadWebMediaRaw(
   mediaUrl: string,
   maxBytesOrOptions?: number | WebMediaOptions,
-  options?: { ssrfPolicy?: SsrFPolicy; localRoots?: readonly string[] | "any" },
+  options?: {
+    ssrfPolicy?: SsrFPolicy;
+    urlAllowlistPrefixes?: readonly string[];
+    localRoots?: readonly string[] | "any";
+  },
 ): Promise<WebMediaResult> {
   if (typeof maxBytesOrOptions === "number" || maxBytesOrOptions === undefined) {
     return await loadWebMediaInternal(mediaUrl, {
       maxBytes: maxBytesOrOptions,
       optimizeImages: false,
       ssrfPolicy: options?.ssrfPolicy,
+      urlAllowlistPrefixes: options?.urlAllowlistPrefixes,
       localRoots: options?.localRoots,
     });
   }

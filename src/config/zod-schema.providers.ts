@@ -24,6 +24,7 @@ export const ChannelsSchema = z
       .object({
         groupPolicy: GroupPolicySchema.optional(),
         heartbeat: ChannelHeartbeatVisibilitySchema,
+        mediaUrlAllowlistPrefixes: z.array(z.string()).optional(),
       })
       .strict()
       .optional(),
