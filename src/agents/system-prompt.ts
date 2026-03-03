@@ -206,6 +206,59 @@ function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readT
   ];
 }
 
+function buildDeliverablesSection(params: { isMinimal: boolean; availableTools: Set<string> }) {
+  if (params.isMinimal) {
+    return [];
+  }
+
+  const hasReportBuild = params.availableTools.has("vault_report_build");
+  const hasPresentationBuild = params.availableTools.has("vault_presentation_build");
+  const hasArtifactWrite = params.availableTools.has("vault_artifact_write");
+  const hasArtifactUrl = params.availableTools.has("vault_artifact_url");
+
+  if (!hasReportBuild && !hasPresentationBuild) {
+    return [];
+  }
+
+  const lines = ["## Deliverables"];
+  if (hasReportBuild) {
+    lines.push(
+      "When the user is asking for a standalone written deliverable, default to a polished PDF report instead of pasting a long memo into chat.",
+      "Written deliverables include memos, summaries, research briefs, weekly updates, one-pagers, analyses, and reports.",
+      "Reports can include headings, tables, quotes, charts, screenshots, and images.",
+      "Report specs must read like the document itself, not like an assistant reply.",
+      "Do not put status updates, follow-up offers, or assistant chatter inside report fields (for example: 'I made...', 'If you want, I can...', 'Let me know...').",
+      "If you want to offer a next step or alternate version, say it in the chat message outside the file, not inside the PDF.",
+    );
+  }
+  if (hasPresentationBuild) {
+    lines.push(
+      "For presentations, decks, or slides, build a presentation artifact instead of a report.",
+    );
+  }
+  lines.push("For spreadsheets or models, use spreadsheet/sheet tools when available.");
+  if (hasArtifactWrite) {
+    lines.push("Store specs and supporting assets with vault_artifact_write.");
+  }
+  if (hasReportBuild) {
+    lines.push(
+      "Report flow: reports/<name>/spec.json -> vault_report_build -> reports/<name>/build/<name>.pdf",
+    );
+  }
+  if (hasPresentationBuild) {
+    lines.push(
+      "Presentation flow: presentations/<name>/spec.json -> vault_presentation_build -> presentations/<name>/build/<name>.pptx",
+    );
+  }
+  if (hasArtifactUrl) {
+    lines.push(
+      "Deliver the finished file directly to the user via vault_artifact_url. Never return vault paths or ask the user to browse internal storage.",
+    );
+  }
+  lines.push("");
+  return lines;
+}
+
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
@@ -426,6 +479,10 @@ export function buildAgentSystemPrompt(params: {
     availableTools,
     citationsMode: params.memoryCitationsMode,
   });
+  const deliverablesSection = buildDeliverablesSection({
+    isMinimal,
+    availableTools,
+  });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
     isMinimal,
@@ -487,6 +544,7 @@ export function buildAgentSystemPrompt(params: {
     "",
     ...skillsSection,
     ...memorySection,
+    ...deliverablesSection,
     // Skip self-update for subagent/none modes
     hasGateway && !isMinimal ? "## OpenClaw Self-Update" : "",
     hasGateway && !isMinimal

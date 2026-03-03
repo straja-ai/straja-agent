@@ -143,6 +143,28 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("sessions_send");
   });
 
+  it("adds report-first deliverable guidance when artifact tools are available", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      toolNames: [
+        "vault_artifact_write",
+        "vault_report_build",
+        "vault_presentation_build",
+        "vault_artifact_url",
+      ],
+    });
+
+    expect(prompt).toContain("## Deliverables");
+    expect(prompt).toContain("default to a polished PDF report");
+    expect(prompt).toContain("reports/<name>/spec.json -> vault_report_build");
+    expect(prompt).toContain("For presentations, decks, or slides");
+    expect(prompt).toContain("Never return vault paths");
+    expect(prompt).toContain("Report specs must read like the document itself");
+    expect(prompt).toContain(
+      "Do not put status updates, follow-up offers, or assistant chatter inside report fields",
+    );
+  });
+
   it("preserves tool casing in the prompt", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

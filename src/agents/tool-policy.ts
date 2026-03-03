@@ -36,6 +36,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "vault_artifact_write",
     "vault_artifact_list",
     "vault_presentation_build",
+    "vault_report_build",
     "vault_artifact_url",
   ],
   // Automation + infra

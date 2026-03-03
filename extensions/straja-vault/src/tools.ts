@@ -109,7 +109,7 @@ export const VaultMemoryWriteSchema = Type.Object({
 export const VaultArtifactWriteSchema = Type.Object({
   path: Type.String({
     description:
-      "Relative path within the editable collection (e.g. 'presentations/q1-report/spec.json').",
+      "Relative path within the editable collection (e.g. 'presentations/q1-report/spec.json' or 'reports/weekly-update/spec.json').",
   }),
   content: Type.String({
     description: "Content to write (text or base64-encoded binary).",
@@ -144,10 +144,18 @@ export const VaultPresentationBuildSchema = Type.Object({
   }),
 });
 
+export const VaultReportBuildSchema = Type.Object({
+  name: Type.String({
+    description:
+      "Report folder name under reports/ (e.g. 'weekly-update'). " +
+      "The spec must exist at editable/reports/<name>/spec.json.",
+  }),
+});
+
 export const VaultArtifactUrlSchema = Type.Object({
   path: Type.String({
     description:
-      "Path within the editable collection (e.g. 'presentations/q1-report/build/q1-report.pptx'). " +
+      "Path within the editable collection (e.g. 'presentations/q1-report/build/q1-report.pptx' or 'reports/weekly-update/build/weekly-update.pdf'). " +
       "Returns a time-limited download URL for agent-side use (e.g. sending via Telegram).",
   }),
 });
@@ -1293,10 +1301,13 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     description:
       "Write content to the editable artifacts collection. Supports text files (JSON, markdown) and binary files (via base64 encoding). " +
       "Use this to store presentation specs, generated files, or other agent-produced artifacts. " +
-      'When storing images for presentations, use encoding "base64" with the correct mimeType, then reference that vault path from the presentation spec.\n\n' +
-      "Path convention: presentations/<name>/spec.json for presentation specs.\n\n" +
+      'When storing images for presentations or reports, use encoding "base64" with the correct mimeType, then reference that vault path from the spec.\n\n' +
+      "Path conventions:\n" +
+      "- presentations/<name>/spec.json for presentation specs\n" +
+      "- reports/<name>/spec.json for report specs\n\n" +
       "Examples:\n" +
       '- path: "presentations/q1-report/spec.json", content: \'{"title":"Q1 Report",...}\', encoding: "utf8"\n' +
+      '- path: "reports/board-memo/spec.json", content: \'{"title":"Board Memo",...}\', encoding: "utf8"\n' +
       '- path: "data/chart.png", content: "<base64>", encoding: "base64", mimeType: "image/png"',
     parameters: VaultArtifactWriteSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
@@ -1506,6 +1517,98 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
             {
               type: "text" as const,
               text: `Built presentation: editable/${data.pptxPath} (${data.size} bytes, ${data.slides} slides)`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  const vaultReportBuild: AnyAgentTool = {
+    name: "vault_report_build",
+    label: "Build Report",
+    description:
+      "Generate a polished PDF report from a report spec stored in the editable collection. " +
+      "Use this for standalone written deliverables such as memos, summaries, research briefs, weekly updates, one-pagers, and analyses. " +
+      "The spec must exist at editable/reports/<name>/spec.json. " +
+      "The generated PDF will be stored at editable/reports/<name>/build/<name>.pdf.\n\n" +
+      "Spec format: { title, subtitle?, author?, date?, summary?, closingNote?, hero?: { data, caption?, alt? }, " +
+      "theme?: { accentColor?, accentSoftColor?, pageColor?, surfaceColor?, inkColor?, mutedColor?, headingFont?, bodyFont? }, " +
+      "sections: [{ heading, kicker?, summary?, blocks: [" +
+      '{ type: "paragraph", text }, ' +
+      '{ type: "bullets", items: [...] }, ' +
+      '{ type: "metrics", items: [{ label, value, note? }, ...] }, ' +
+      '{ type: "quote", text, attribution? }, ' +
+      '{ type: "table", caption?, headers: [...], rows: [[...], ...] }, ' +
+      '{ type: "image", image: { data, caption?, alt? } }, ' +
+      '{ type: "callout", tone?: "info"|"success"|"warning", title?, text }' +
+      "] }] }\n\n" +
+      "REPORT CONTENT ONLY: every text field in the spec should be document content relevant to the topic. " +
+      "Do not include assistant framing or follow-up chatter like 'I made...', 'If you want, I can...', or 'Let me know...'. " +
+      "Any optional next step belongs in the separate chat reply, not inside the report.\n\n" +
+      "REPORT VISUALS: For image blocks and hero images, prefer relevant images already in the vault. " +
+      "If none exist, use available image/web/browser tools to generate, capture, or fetch a visual, then store it with vault_artifact_write and reference that saved vault path. " +
+      "The image data field may be an HTTP/HTTPS URL, a vault artifact path, or a base64 data URI. " +
+      "Reports can include screenshots, charts, and other visuals as image blocks.",
+    parameters: VaultReportBuildSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const name = String(params.name || "");
+      if (!name) {
+        return { content: [{ type: "text" as const, text: "Error: name is required." }] };
+      }
+
+      try {
+        const resp = await fetch(`${baseUrl}/reports/build`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          let errorMsg: string;
+          try {
+            const errData = JSON.parse(errText);
+            errorMsg = errData.error || errText;
+          } catch {
+            errorMsg = errText;
+          }
+          return {
+            content: [
+              { type: "text" as const, text: `Report build error (${resp.status}): ${errorMsg}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          ok: boolean;
+          pdfPath?: string;
+          size?: number;
+          sections?: number;
+          error?: string;
+        };
+        if (!data.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Report build failed: ${data.error ?? "unknown error"}`,
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Built report: editable/${data.pdfPath} (${data.size} bytes, ${data.sections} sections)`,
             },
           ],
           details: data,
@@ -2137,6 +2240,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultArtifactWrite,
     vaultArtifactList,
     vaultPresentationBuild,
+    vaultReportBuild,
     vaultArtifactUrl,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
