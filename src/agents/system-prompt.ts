@@ -259,6 +259,62 @@ function buildDeliverablesSection(params: { isMinimal: boolean; availableTools: 
   return lines;
 }
 
+function buildWebResearchSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+
+  const hasVaultDuckDuckGo = params.availableTools.has("vault_web_search_duckduckgo");
+  const hasWebSearch = params.availableTools.has("web_search");
+  const hasWebFetch = params.availableTools.has("web_fetch");
+  const hasBrowser =
+    params.availableTools.has("browser") ||
+    Array.from(params.availableTools).some((tool) => tool.startsWith("vault_browser_"));
+
+  if (!hasVaultDuckDuckGo && !hasWebSearch && !hasWebFetch && !hasBrowser) {
+    return [];
+  }
+
+  const lines = ["## Web Research"];
+  const preferredSearchTool = hasVaultDuckDuckGo
+    ? params.resolveToolName("vault_web_search_duckduckgo")
+    : hasWebSearch
+      ? params.resolveToolName("web_search")
+      : null;
+
+  if (preferredSearchTool) {
+    lines.push(
+      `For ordinary factual web lookups, current-events questions, rankings, dates, and quick comparisons, use ${preferredSearchTool} first.`,
+      `Do not open Google or another search engine in the browser for routine lookups when ${preferredSearchTool} is available.`,
+    );
+  }
+
+  if (hasWebFetch) {
+    lines.push(
+      `Use ${params.resolveToolName("web_fetch")} after search when you need to inspect one or two specific result pages in more detail.`,
+    );
+  }
+
+  if (hasBrowser) {
+    lines.push(
+      "Use browser tools only when a task needs interactive browsing: login/auth flows, forms, clicks, multi-step navigation, JS-rendered pages, screenshots, downloads, or site interactions that search/fetch cannot handle.",
+    );
+  }
+
+  if (preferredSearchTool && hasBrowser) {
+    lines.push(
+      "Default escalation path: search first, then fetch a specific page if needed, and use browser tools only as the final fallback.",
+    );
+  }
+
+  lines.push("");
+  return lines;
+}
+
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
   defaultThinkLevel?: ThinkLevel;
@@ -327,6 +383,8 @@ export function buildAgentSystemPrompt(params: {
     process: "Manage background exec sessions",
     web_search: "Search the web (Brave API)",
     web_fetch: "Fetch and extract readable content from a URL",
+    vault_web_search_duckduckgo:
+      "Search the web via the vault's DuckDuckGo adapter (preferred for simple factual lookups)",
     // Channel docking: add login tools here when a channel needs interactive linking.
     browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
@@ -483,6 +541,11 @@ export function buildAgentSystemPrompt(params: {
     isMinimal,
     availableTools,
   });
+  const webResearchSection = buildWebResearchSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
     isMinimal,
@@ -545,6 +608,7 @@ export function buildAgentSystemPrompt(params: {
     ...skillsSection,
     ...memorySection,
     ...deliverablesSection,
+    ...webResearchSection,
     // Skip self-update for subagent/none modes
     hasGateway && !isMinimal ? "## OpenClaw Self-Update" : "",
     hasGateway && !isMinimal

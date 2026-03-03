@@ -165,6 +165,23 @@ describe("buildAgentSystemPrompt", () => {
     );
   });
 
+  it("guides the agent to use web search before browser tools for routine lookups", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      toolNames: [
+        "vault_web_search_duckduckgo",
+        "web_fetch",
+        "vault_browser_navigate",
+        "vault_browser_snapshot",
+      ],
+    });
+
+    expect(prompt).toContain("## Web Research");
+    expect(prompt).toContain("use vault_web_search_duckduckgo first");
+    expect(prompt).toContain("Do not open Google or another search engine in the browser");
+    expect(prompt).toContain("Default escalation path: search first, then fetch");
+  });
+
   it("preserves tool casing in the prompt", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

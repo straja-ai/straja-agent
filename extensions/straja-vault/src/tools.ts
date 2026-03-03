@@ -160,6 +160,20 @@ export const VaultArtifactUrlSchema = Type.Object({
   }),
 });
 
+export const VaultWebSearchDuckDuckGoSchema = Type.Object({
+  query: Type.String({
+    description: "Web search query to run through the vault's DuckDuckGo search adapter.",
+  }),
+  limit: Type.Optional(
+    Type.Number({
+      description: "Maximum number of search results to return (default: 5, max: 10).",
+      minimum: 1,
+      maximum: 10,
+      default: 5,
+    }),
+  ),
+});
+
 // ---------------------------------------------------------------------------
 // Gmail Draft Schema
 // ---------------------------------------------------------------------------
@@ -2049,9 +2063,101 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  const vaultWebSearchDuckDuckGo: AnyAgentTool = {
+    name: "vault_web_search_duckduckgo",
+    label: "DuckDuckGo Search",
+    description:
+      "Search the public web with DuckDuckGo through the vault. " +
+      "This is the default tool for ordinary factual web lookups when vault content is insufficient and you need current public web results. " +
+      "Prefer this over browser tools for simple questions, rankings, dates, medal tables, definitions, and quick comparisons. " +
+      "The vault records these searches in an immutable audit log shown in the Web tab.",
+    parameters: VaultWebSearchDuckDuckGoSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const query = String(params.query || "");
+      if (!query.trim()) {
+        return { content: [{ type: "text" as const, text: "Error: query is required." }] };
+      }
+
+      try {
+        const resp = await fetch(`${baseUrl}/connections/web-search/duckduckgo`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            limit: typeof params.limit === "number" ? params.limit : undefined,
+          }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          let errorMsg: string;
+          try {
+            const errData = JSON.parse(errText);
+            errorMsg = errData.error || errText;
+          } catch {
+            errorMsg = errText;
+          }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `DuckDuckGo search error (${resp.status}): ${errorMsg}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          provider: "duckduckgo";
+          query: string;
+          results: Array<{ title: string; url: string; snippet?: string | null }>;
+        };
+
+        if (!Array.isArray(data.results) || data.results.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `DuckDuckGo returned no results for "${data.query}".`,
+              },
+            ],
+            details: data,
+          };
+        }
+
+        const summary = data.results
+          .map((item, index) => {
+            const lines = [`${index + 1}. ${item.title}`, `   ${item.url}`];
+            if (item.snippet) lines.push(`   ${item.snippet}`);
+            return lines.join("\n");
+          })
+          .join("\n\n");
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `DuckDuckGo results for "${data.query}":\n\n${summary}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   // ---------------------------------------------------------------------------
   // Browser tools — proxy to vault's playwright-mcp browser service
   // ---------------------------------------------------------------------------
+
+  const browserUsageNote =
+    "Use browser tools only for interactive or fallback web work: login/auth flows, forms, clicks, multi-step navigation, JS-rendered pages, screenshots, or downloads. " +
+    "Do not use them as a general search-engine path when vault_web_search_duckduckgo can answer the question.";
 
   /** Helper: call a vault browser tool via the HTTP proxy endpoint */
   async function callBrowserTool(
@@ -2086,7 +2192,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserNavigate: AnyAgentTool = {
     name: "vault_browser_navigate",
     label: "Browser Navigate",
-    description: "Navigate the vault browser to a URL.",
+    description: `Navigate the vault browser to a URL. ${browserUsageNote}`,
     parameters: BrowserNavigateSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_navigate", params, signal);
@@ -2099,7 +2205,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     description:
       "Get an accessibility tree snapshot of the current page. " +
       "Returns a structured text representation of all page elements with references " +
-      "you can use in click/type/fill actions.",
+      `you can use in click/type/fill actions. ${browserUsageNote}`,
     parameters: BrowserSnapshotSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_snapshot", params, signal);
@@ -2109,8 +2215,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserClick: AnyAgentTool = {
     name: "vault_browser_click",
     label: "Browser Click",
-    description:
-      "Click an element on the page. Use 'ref' from a snapshot for precision, or describe the element.",
+    description: `Click an element on the page. Use 'ref' from a snapshot for precision, or describe the element. ${browserUsageNote}`,
     parameters: BrowserClickSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_click", params, signal);
@@ -2120,8 +2225,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserType: AnyAgentTool = {
     name: "vault_browser_type",
     label: "Browser Type",
-    description:
-      "Type text into an editable element. Set submit: true to press Enter after typing.",
+    description: `Type text into an editable element. Set submit: true to press Enter after typing. ${browserUsageNote}`,
     parameters: BrowserTypeSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_type", params, signal);
@@ -2131,7 +2235,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserFill: AnyAgentTool = {
     name: "vault_browser_fill",
     label: "Browser Fill",
-    description: "Clear a form field and fill it with a new value.",
+    description: `Clear a form field and fill it with a new value. ${browserUsageNote}`,
     parameters: BrowserFillSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_fill", params, signal);
@@ -2141,7 +2245,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserSelect: AnyAgentTool = {
     name: "vault_browser_select",
     label: "Browser Select",
-    description: "Select an option from a dropdown/select element.",
+    description: `Select an option from a dropdown/select element. ${browserUsageNote}`,
     parameters: BrowserSelectSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_select_option", params, signal);
@@ -2151,7 +2255,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserHover: AnyAgentTool = {
     name: "vault_browser_hover",
     label: "Browser Hover",
-    description: "Hover over an element to reveal tooltips or dropdown menus.",
+    description: `Hover over an element to reveal tooltips or dropdown menus. ${browserUsageNote}`,
     parameters: BrowserHoverSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_hover", params, signal);
@@ -2161,7 +2265,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserPressKey: AnyAgentTool = {
     name: "vault_browser_press_key",
     label: "Browser Press Key",
-    description: "Press a keyboard key or combination (e.g. Enter, Escape, Control+c, Tab).",
+    description: `Press a keyboard key or combination (e.g. Enter, Escape, Control+c, Tab). ${browserUsageNote}`,
     parameters: BrowserPressKeySchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_press_key", params, signal);
@@ -2171,7 +2275,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserScreenshot: AnyAgentTool = {
     name: "vault_browser_screenshot",
     label: "Browser Screenshot",
-    description: "Take a screenshot of the current page. Returns a base64 PNG image.",
+    description: `Take a screenshot of the current page. Returns a base64 PNG image. ${browserUsageNote}`,
     parameters: BrowserScreenshotSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_take_screenshot", params, signal);
@@ -2181,7 +2285,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserTabList: AnyAgentTool = {
     name: "vault_browser_tab_list",
     label: "Browser Tab List",
-    description: "List all open browser tabs with their URLs and titles.",
+    description: `List all open browser tabs with their URLs and titles. ${browserUsageNote}`,
     parameters: BrowserTabListSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_tab_list", params, signal);
@@ -2191,7 +2295,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserTabNew: AnyAgentTool = {
     name: "vault_browser_tab_new",
     label: "Browser New Tab",
-    description: "Open a new browser tab, optionally navigating to a URL.",
+    description: `Open a new browser tab, optionally navigating to a URL. ${browserUsageNote}`,
     parameters: BrowserTabNewSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_tab_new", params, signal);
@@ -2201,7 +2305,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserTabClose: AnyAgentTool = {
     name: "vault_browser_tab_close",
     label: "Browser Close Tab",
-    description: "Close a browser tab by index.",
+    description: `Close a browser tab by index. ${browserUsageNote}`,
     parameters: BrowserTabCloseSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_tab_close", params, signal);
@@ -2211,7 +2315,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserConsole: AnyAgentTool = {
     name: "vault_browser_console",
     label: "Browser Console",
-    description: "Get browser console messages (log, warn, error).",
+    description: `Get browser console messages (log, warn, error). ${browserUsageNote}`,
     parameters: BrowserConsoleSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_console_messages", params, signal);
@@ -2221,7 +2325,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   const vaultBrowserWait: AnyAgentTool = {
     name: "vault_browser_wait",
     label: "Browser Wait",
-    description: "Wait for specific text to appear or disappear on the page.",
+    description: `Wait for specific text to appear or disappear on the page. ${browserUsageNote}`,
     parameters: BrowserWaitSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserTool("browser_wait_for", params, signal);
@@ -2242,6 +2346,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultPresentationBuild,
     vaultReportBuild,
     vaultArtifactUrl,
+    vaultWebSearchDuckDuckGo,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
     vaultCalendarCreateEvent,
