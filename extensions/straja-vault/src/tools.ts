@@ -103,6 +103,56 @@ export const VaultMemoryWriteSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
+// Artifact Schemas
+// ---------------------------------------------------------------------------
+
+export const VaultArtifactWriteSchema = Type.Object({
+  path: Type.String({
+    description:
+      "Relative path within the editable collection (e.g. 'presentations/q1-report/spec.json').",
+  }),
+  content: Type.String({
+    description: "Content to write (text or base64-encoded binary).",
+  }),
+  encoding: Type.Optional(
+    Type.Union([Type.Literal("utf8"), Type.Literal("base64")], {
+      description: "Content encoding: 'utf8' for text files, 'base64' for binary files.",
+      default: "utf8",
+    }),
+  ),
+  mimeType: Type.Optional(
+    Type.String({
+      description: "MIME type for binary content (e.g. 'image/png').",
+    }),
+  ),
+});
+
+export const VaultArtifactListSchema = Type.Object({
+  prefix: Type.Optional(
+    Type.String({
+      description: "Path prefix filter (e.g. 'presentations/'). Omit to list all artifacts.",
+      default: "",
+    }),
+  ),
+});
+
+export const VaultPresentationBuildSchema = Type.Object({
+  name: Type.String({
+    description:
+      "Presentation folder name under presentations/ (e.g. 'quarterly-review'). " +
+      "The spec must exist at editable/presentations/<name>/spec.json.",
+  }),
+});
+
+export const VaultArtifactUrlSchema = Type.Object({
+  path: Type.String({
+    description:
+      "Path within the editable collection (e.g. 'presentations/q1-report/build/q1-report.pptx'). " +
+      "Returns a time-limited download URL for agent-side use (e.g. sending via Telegram).",
+  }),
+});
+
+// ---------------------------------------------------------------------------
 // Gmail Draft Schema
 // ---------------------------------------------------------------------------
 
@@ -467,6 +517,14 @@ type SearchResult = {
   score: number;
   context: string | null;
   snippet: string;
+};
+
+type ArtifactItem = {
+  path: string;
+  modifiedAt: string;
+  size: number;
+  mimeType: string;
+  isBinary: boolean;
 };
 
 export type VaultToolsOptions = {
@@ -1228,6 +1286,297 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // -- vault_artifact_write ----------------------------------------------------
+  const vaultArtifactWrite: AnyAgentTool = {
+    name: "vault_artifact_write",
+    label: "Artifact Write",
+    description:
+      "Write content to the editable artifacts collection. Supports text files (JSON, markdown) and binary files (via base64 encoding). " +
+      "Use this to store presentation specs, generated files, or other agent-produced artifacts. " +
+      'When storing images for presentations, use encoding "base64" with the correct mimeType, then reference that vault path from the presentation spec.\n\n' +
+      "Path convention: presentations/<name>/spec.json for presentation specs.\n\n" +
+      "Examples:\n" +
+      '- path: "presentations/q1-report/spec.json", content: \'{"title":"Q1 Report",...}\', encoding: "utf8"\n' +
+      '- path: "data/chart.png", content: "<base64>", encoding: "base64", mimeType: "image/png"',
+    parameters: VaultArtifactWriteSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const path = String(params.path || "");
+      const content = String(params.content ?? "");
+      const encoding = String(params.encoding || "utf8");
+      const mimeType = params.mimeType ? String(params.mimeType) : undefined;
+
+      if (!path) {
+        return { content: [{ type: "text" as const, text: "Error: path is required." }] };
+      }
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "Error: content is required." }] };
+      }
+
+      try {
+        const encodedPath = encodeURIComponent(path);
+        if (encoding === "base64") {
+          // Write binary artifacts through the raw endpoint; the vault stores them as binary blobs.
+          const resp = await fetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              ...(mimeType ? { "X-Mime-Type": mimeType } : {}),
+            },
+            body: Buffer.from(content, "base64"),
+            signal,
+          });
+          if (!resp.ok) {
+            const errText = await resp.text();
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Artifact write error (${resp.status}): ${errText}`,
+                },
+              ],
+            };
+          }
+          const data = (await resp.json()) as { ok: boolean; hash?: string };
+          return {
+            content: [{ type: "text" as const, text: `Wrote editable/${path}` }],
+            details: data,
+          };
+        }
+
+        // Text content — write directly through raw endpoint
+        const resp = await fetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+          method: "PUT",
+          body: content,
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Artifact write error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as { ok: boolean; hash?: string };
+        return {
+          content: [{ type: "text" as const, text: `Wrote editable/${path}` }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_artifact_list ----------------------------------------------------
+  const vaultArtifactList: AnyAgentTool = {
+    name: "vault_artifact_list",
+    label: "Artifact List",
+    description:
+      "List artifacts in the editable collection, optionally filtered by path prefix. " +
+      "Use this before adding presentation image slides to look for existing vault images you can reuse.\n\n" +
+      "Examples:\n" +
+      '- prefix: "presentations/" → list all presentations\n' +
+      '- prefix: "presentations/q1-report/" → list files in a specific presentation\n' +
+      "- omit prefix → list all artifacts",
+    parameters: VaultArtifactListSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const prefix = String(params.prefix || "");
+
+      try {
+        const url = prefix
+          ? `${baseUrl}/artifacts?prefix=${encodeURIComponent(prefix)}`
+          : `${baseUrl}/artifacts`;
+        const resp = await fetch(url, { signal });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Artifact list error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as { items: ArtifactItem[] };
+        const items = data.items || [];
+
+        if (items.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: prefix
+                  ? `No artifacts matching prefix: ${prefix}`
+                  : "No artifacts in editable collection.",
+              },
+            ],
+          };
+        }
+
+        const lines = items.map(
+          (i) =>
+            `  ${i.path} (${i.isBinary ? i.mimeType : "text"}, ${i.size} bytes, ${i.modifiedAt})`,
+        );
+        return {
+          content: [
+            { type: "text" as const, text: `Artifacts (${items.length}):\n${lines.join("\n")}` },
+          ],
+          details: { items },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_presentation_build ------------------------------------------------
+  const vaultPresentationBuild: AnyAgentTool = {
+    name: "vault_presentation_build",
+    label: "Build Presentation",
+    description:
+      "Generate a PPTX file from a presentation spec stored in the editable collection. " +
+      "The spec must exist at editable/presentations/<name>/spec.json. " +
+      "The generated PPTX will be stored at editable/presentations/<name>/build/<name>.pptx.\n\n" +
+      "Spec format: { title, subtitle?, author?, theme?: { primaryColor?, secondaryColor?, backgroundColor?, fontFace?, fontSize? }, " +
+      'slides: [{ type: "title"|"bullets"|"two_col"|"image"|"table", title?, subtitle?, bullets?, left?, right?, image?, table?, notes? }] }\n\n' +
+      'IMAGE SLIDES: For type "image", set image: { data, caption?, fit?: "contain"|"cover" }. ' +
+      "Before using an image slide, first check vault_artifact_list for existing relevant images in the vault. " +
+      "If none exist, use available image/web tools to generate or fetch an image, then store it with vault_artifact_write and reference that saved vault path. " +
+      "Only fall back to a direct HTTPS image URL when you cannot persist the image first.\n" +
+      "The data field MUST be one of:\n" +
+      '  1. An HTTP/HTTPS URL (e.g. "https://images.unsplash.com/photo-xxx?w=1200") — the build endpoint will fetch it server-side\n' +
+      '  2. A vault path written via vault_artifact_write (e.g. "presentations/deck/hero.png") — resolved from the editable collection\n' +
+      '  3. A base64 data URI (e.g. "data:image/png;base64,...")\n' +
+      'Do not create type "image" slides without a resolvable image.data value. ' +
+      "If no usable image can be found or generated, use a bullets or two_col slide instead of leaving an image slide blank. " +
+      "The build endpoint now fails when an image cannot be resolved into the PPTX.",
+    parameters: VaultPresentationBuildSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const name = String(params.name || "");
+      if (!name) {
+        return { content: [{ type: "text" as const, text: "Error: name is required." }] };
+      }
+
+      try {
+        const resp = await fetch(`${baseUrl}/artifacts/build`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          let errorMsg: string;
+          try {
+            const errData = JSON.parse(errText);
+            errorMsg = errData.error || errText;
+          } catch {
+            errorMsg = errText;
+          }
+          return {
+            content: [{ type: "text" as const, text: `Build error (${resp.status}): ${errorMsg}` }],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          ok: boolean;
+          pptxPath?: string;
+          size?: number;
+          slides?: number;
+          error?: string;
+        };
+        if (!data.ok) {
+          return {
+            content: [
+              { type: "text" as const, text: `Build failed: ${data.error ?? "unknown error"}` },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Built presentation: editable/${data.pptxPath} (${data.size} bytes, ${data.slides} slides)`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_artifact_url ------------------------------------------------------
+  const vaultArtifactUrl: AnyAgentTool = {
+    name: "vault_artifact_url",
+    label: "Artifact URL",
+    description:
+      "Get a time-limited download URL for an artifact in the editable collection. " +
+      "The URL is HMAC-signed and valid for 10 minutes. " +
+      "To send this file via Telegram, include the URL on its own line prefixed with MEDIA: " +
+      "(e.g. MEDIA:http://127.0.0.1:8181/artifacts/download?path=...&token=...). " +
+      "The framework will automatically download the file and deliver it as a Telegram document.",
+    parameters: VaultArtifactUrlSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const path = String(params.path || "");
+      if (!path) {
+        return { content: [{ type: "text" as const, text: "Error: path is required." }] };
+      }
+
+      try {
+        const resp = await fetch(`${baseUrl}/artifacts/url`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          let errorMsg: string;
+          try {
+            const errData = JSON.parse(errText);
+            errorMsg = errData.error || errText;
+          } catch {
+            errorMsg = errText;
+          }
+          return {
+            content: [
+              { type: "text" as const, text: `Artifact URL error (${resp.status}): ${errorMsg}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as { url: string; expiresAtMs: number };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Download URL (10 min TTL) for editable/${path}:\nMEDIA:${data.url}\n\nExpires: ${new Date(data.expiresAtMs).toISOString()}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   // -- vault_gmail_create_draft ------------------------------------------------
   const vaultGmailCreateDraft: AnyAgentTool = {
     name: "vault_gmail_create_draft",
@@ -1785,6 +2134,10 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultMemorySearch,
     vaultMemoryGet,
     vaultMemoryWrite,
+    vaultArtifactWrite,
+    vaultArtifactList,
+    vaultPresentationBuild,
+    vaultArtifactUrl,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
     vaultCalendarCreateEvent,

@@ -43,4 +43,19 @@ describe("buildReplyPayloads media filter integration", () => {
     // Text filter removes the payload entirely (text matched), so nothing remains.
     expect(replyPayloads).toHaveLength(0);
   });
+
+  it("strips duplicate mediaUrls but preserves the reply text", () => {
+    const { replyPayloads } = buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "Deck is ready", mediaUrls: ["https://example.com/deck.pptx?token=1"] }],
+      messagingToolSentMediaUrls: ["https://example.com/deck.pptx?token=1"],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "Deck is ready",
+      mediaUrl: undefined,
+      mediaUrls: undefined,
+    });
+  });
 });

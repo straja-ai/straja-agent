@@ -31,6 +31,13 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   ],
   // UI helpers
   "group:ui": ["browser", "canvas"],
+  // Artifact creation tools
+  "group:artifacts": [
+    "vault_artifact_write",
+    "vault_artifact_list",
+    "vault_presentation_build",
+    "vault_artifact_url",
+  ],
   // Automation + infra
   "group:automation": ["vault_cron", "gateway"],
   // Messaging surface

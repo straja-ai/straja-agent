@@ -383,6 +383,8 @@ export async function handleToolExecutionEnd(
   if (ctx.params.onToolResult && !isToolError && !ctx.shouldEmitToolOutput()) {
     const mediaPaths = extractToolResultMediaPaths(result);
     if (mediaPaths.length > 0) {
+      ctx.state.messagingToolSentMediaUrls.push(...mediaPaths);
+      ctx.trimMessagingToolSent();
       try {
         void ctx.params.onToolResult({ mediaUrls: mediaPaths });
       } catch {

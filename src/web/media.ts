@@ -145,14 +145,20 @@ function isHeicSource(opts: { contentType?: string; fileName?: string }): boolea
 }
 
 const VAULT_SCREENSHOT_FETCH_BASE_PATH = "/connections/browser/screenshots/file";
+const VAULT_ARTIFACT_FETCH_BASE_PATH = "/artifacts/download";
 const VAULT_SCREENSHOT_FETCH_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const VAULT_SCREENSHOT_FETCH_TOKEN_RE = /^[A-Fa-f0-9]{64}$/;
+
+const VAULT_STRICT_BASE_PATHS = new Set([
+  VAULT_SCREENSHOT_FETCH_BASE_PATH,
+  VAULT_ARTIFACT_FETCH_BASE_PATH,
+]);
 
 type StrictMediaUrlAllowRule = {
   protocol: "http:";
   hostname: "127.0.0.1";
   port: string;
-  basePath: typeof VAULT_SCREENSHOT_FETCH_BASE_PATH;
+  basePath: string;
 };
 
 function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaUrlAllowRule[] {
@@ -178,7 +184,7 @@ function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaU
       continue;
     }
     const normalizedPath = parsed.pathname.replace(/\/+$/, "");
-    if (normalizedPath !== VAULT_SCREENSHOT_FETCH_BASE_PATH) {
+    if (!VAULT_STRICT_BASE_PATHS.has(normalizedPath)) {
       continue;
     }
     if (parsed.search || parsed.hash) {
@@ -188,7 +194,7 @@ function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaU
       protocol: "http:",
       hostname: "127.0.0.1",
       port: parsed.port || "80",
-      basePath: VAULT_SCREENSHOT_FETCH_BASE_PATH,
+      basePath: normalizedPath,
     });
   }
   return rules;
@@ -205,24 +211,45 @@ function matchesStrictMediaUrlAllowRule(url: URL, rule: StrictMediaUrlAllowRule)
     return false;
   }
 
-  const prefix = `${rule.basePath}/`;
-  if (!url.pathname.startsWith(prefix)) {
-    return false;
-  }
-  const opaqueId = url.pathname.slice(prefix.length);
-  if (!VAULT_SCREENSHOT_FETCH_ID_RE.test(opaqueId) || opaqueId.includes("/")) {
-    return false;
+  // Screenshot pattern: /base/path/<id>?token=<hex>
+  if (rule.basePath === VAULT_SCREENSHOT_FETCH_BASE_PATH) {
+    const prefix = `${rule.basePath}/`;
+    if (!url.pathname.startsWith(prefix)) {
+      return false;
+    }
+    const opaqueId = url.pathname.slice(prefix.length);
+    if (!VAULT_SCREENSHOT_FETCH_ID_RE.test(opaqueId) || opaqueId.includes("/")) {
+      return false;
+    }
+    const params = url.searchParams;
+    if (params.size !== 1) {
+      return false;
+    }
+    const token = params.get("token");
+    if (!token || !VAULT_SCREENSHOT_FETCH_TOKEN_RE.test(token)) {
+      return false;
+    }
+    return true;
   }
 
-  const params = url.searchParams;
-  if (params.size !== 1) {
-    return false;
+  // Artifact download pattern: /artifacts/download?path=<path>&token=<hex>[&collection=<name>]
+  if (rule.basePath === VAULT_ARTIFACT_FETCH_BASE_PATH) {
+    if (url.pathname !== VAULT_ARTIFACT_FETCH_BASE_PATH) {
+      return false;
+    }
+    const params = url.searchParams;
+    const token = params.get("token");
+    const path = params.get("path");
+    if (!token || !path) {
+      return false;
+    }
+    if (!VAULT_SCREENSHOT_FETCH_TOKEN_RE.test(token)) {
+      return false;
+    }
+    return true;
   }
-  const token = params.get("token");
-  if (!token || !VAULT_SCREENSHOT_FETCH_TOKEN_RE.test(token)) {
-    return false;
-  }
-  return true;
+
+  return false;
 }
 
 function toJpegFileName(fileName?: string): string | undefined {

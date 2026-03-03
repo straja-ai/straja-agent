@@ -101,6 +101,8 @@ describe("handleToolExecutionEnd media emission", () => {
     expect(onToolResult).toHaveBeenCalledWith({
       mediaUrls: ["/tmp/screenshot.png"],
     });
+    expect(ctx.state.messagingToolSentMediaUrls).toEqual(["/tmp/screenshot.png"]);
+    expect(ctx.trimMessagingToolSent).toHaveBeenCalled();
   });
 
   it("does NOT emit media when verbose is full (emitToolOutput handles it)", async () => {
