@@ -25,6 +25,14 @@ function resolveVaultWorkspaceOps(): VaultWorkspaceOps | undefined {
   return factory?.();
 }
 
+function requireVaultWorkspaceOps(context: string): VaultWorkspaceOps {
+  const ops = resolveVaultWorkspaceOps();
+  if (ops) {
+    return ops;
+  }
+  throw new Error(`[vault] ${context}: workspace patch is missing; refusing disk fallback`);
+}
+
 /** Well-known Symbol for the bootstrap patch (vault-backed bootstrap file loader). */
 const BOOTSTRAP_PATCH_KEY = Symbol.for("openclaw.bootstrapPatchCallback");
 
@@ -34,6 +42,14 @@ function resolveVaultBootstrapLoader(): VaultBootstrapLoader | undefined {
   const g = globalThis as Record<symbol, unknown>;
   const factory = g[BOOTSTRAP_PATCH_KEY] as (() => VaultBootstrapLoader) | undefined;
   return factory?.();
+}
+
+function requireVaultBootstrapLoader(context: string): VaultBootstrapLoader {
+  const loader = resolveVaultBootstrapLoader();
+  if (loader) {
+    return loader;
+  }
+  throw new Error(`[vault] ${context}: bootstrap patch is missing; refusing disk fallback`);
 }
 
 export function resolveDefaultAgentWorkspaceDir(
@@ -64,35 +80,6 @@ const WORKSPACE_STATE_VERSION = 1;
 
 const workspaceTemplateCache = new Map<string, Promise<string>>();
 let gitAvailabilityPromise: Promise<boolean> | null = null;
-
-// File content cache with mtime invalidation to avoid redundant reads
-const workspaceFileCache = new Map<string, { content: string; mtimeMs: number }>();
-
-/**
- * Read file with caching based on mtime. Returns cached content if file
- * hasn't changed, otherwise reads from disk and updates cache.
- */
-async function readFileWithCache(filePath: string): Promise<string> {
-  try {
-    const stats = await fs.stat(filePath);
-    const mtimeMs = stats.mtimeMs;
-    const cached = workspaceFileCache.get(filePath);
-
-    // Return cached content if mtime matches
-    if (cached && cached.mtimeMs === mtimeMs) {
-      return cached.content;
-    }
-
-    // Read from disk and update cache
-    const content = await fs.readFile(filePath, "utf-8");
-    workspaceFileCache.set(filePath, { content, mtimeMs });
-    return content;
-  } catch (error) {
-    // Remove from cache if file doesn't exist or is unreadable
-    workspaceFileCache.delete(filePath);
-    throw error;
-  }
-}
 
 function stripFrontMatter(content: string): string {
   if (!content.startsWith("---")) {
@@ -227,42 +214,17 @@ function parseWorkspaceOnboardingState(raw: string): WorkspaceOnboardingState | 
 const WORKSPACE_STATE_VAULT_KEY = ".openclaw/workspace-state.json";
 
 async function readWorkspaceOnboardingState(statePath: string): Promise<WorkspaceOnboardingState> {
-  // Vault mode: read from vault _workspace collection
-  const vaultOps = resolveVaultWorkspaceOps();
-  if (vaultOps) {
-    try {
-      const raw = await vaultOps.readFile(WORKSPACE_STATE_VAULT_KEY);
-      if (raw) {
-        return (
-          parseWorkspaceOnboardingState(raw) ?? {
-            version: WORKSPACE_STATE_VERSION,
-          }
-        );
-      }
-      return { version: WORKSPACE_STATE_VERSION };
-    } catch {
-      // Vault unreachable — no fallback to disk
-      return { version: WORKSPACE_STATE_VERSION };
-    }
-  }
-
-  // No vault (shouldn't happen in production)
-  try {
-    const raw = await fs.readFile(statePath, "utf-8");
+  void statePath;
+  const vaultOps = requireVaultWorkspaceOps("readWorkspaceOnboardingState");
+  const raw = await vaultOps.readFile(WORKSPACE_STATE_VAULT_KEY);
+  if (raw) {
     return (
       parseWorkspaceOnboardingState(raw) ?? {
         version: WORKSPACE_STATE_VERSION,
       }
     );
-  } catch (err) {
-    const anyErr = err as { code?: string };
-    if (anyErr.code !== "ENOENT") {
-      throw err;
-    }
-    return {
-      version: WORKSPACE_STATE_VERSION,
-    };
   }
+  return { version: WORKSPACE_STATE_VERSION };
 }
 
 async function readWorkspaceOnboardingStateForDir(dir: string): Promise<WorkspaceOnboardingState> {
@@ -281,25 +243,10 @@ async function writeWorkspaceOnboardingState(
   statePath: string,
   state: WorkspaceOnboardingState,
 ): Promise<void> {
+  void statePath;
   const payload = `${JSON.stringify(state, null, 2)}\n`;
-
-  // Vault mode: write to vault _workspace collection
-  const vaultOps = resolveVaultWorkspaceOps();
-  if (vaultOps) {
-    await vaultOps.writeFile(WORKSPACE_STATE_VAULT_KEY, payload);
-    return;
-  }
-
-  // No vault (shouldn't happen in production)
-  await fs.mkdir(path.dirname(statePath), { recursive: true });
-  const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now().toString(36)}`;
-  try {
-    await fs.writeFile(tmpPath, payload, { encoding: "utf-8" });
-    await fs.rename(tmpPath, statePath);
-  } catch (err) {
-    await fs.unlink(tmpPath).catch(() => {});
-    throw err;
-  }
+  const vaultOps = requireVaultWorkspaceOps("writeWorkspaceOnboardingState");
+  await vaultOps.writeFile(WORKSPACE_STATE_VAULT_KEY, payload);
 }
 
 async function hasGitRepo(dir: string): Promise<boolean> {
@@ -358,6 +305,7 @@ export async function ensureAgentWorkspace(params?: {
   heartbeatPath?: string;
   bootstrapPath?: string;
 }> {
+  requireVaultWorkspaceOps("ensureAgentWorkspace");
   const rawDir = params?.dir?.trim() ? params.dir.trim() : DEFAULT_AGENT_WORKSPACE_DIR;
   const dir = resolveUserPath(rawDir);
   await fs.mkdir(dir, { recursive: true });
@@ -462,43 +410,6 @@ export async function ensureAgentWorkspace(params?: {
   };
 }
 
-async function resolveMemoryBootstrapEntries(
-  resolvedDir: string,
-): Promise<Array<{ name: WorkspaceBootstrapFileName; filePath: string }>> {
-  const candidates: WorkspaceBootstrapFileName[] = [
-    DEFAULT_MEMORY_FILENAME,
-    DEFAULT_MEMORY_ALT_FILENAME,
-  ];
-  const entries: Array<{ name: WorkspaceBootstrapFileName; filePath: string }> = [];
-  for (const name of candidates) {
-    const filePath = path.join(resolvedDir, name);
-    try {
-      await fs.access(filePath);
-      entries.push({ name, filePath });
-    } catch {
-      // optional
-    }
-  }
-  if (entries.length <= 1) {
-    return entries;
-  }
-
-  const seen = new Set<string>();
-  const deduped: Array<{ name: WorkspaceBootstrapFileName; filePath: string }> = [];
-  for (const entry of entries) {
-    let key = entry.filePath;
-    try {
-      key = await fs.realpath(entry.filePath);
-    } catch {}
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    deduped.push(entry);
-  }
-  return deduped;
-}
-
 export async function loadWorkspaceBootstrapFiles(dir: string): Promise<WorkspaceBootstrapFile[]> {
   const resolvedDir = resolveUserPath(dir);
 
@@ -536,45 +447,13 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
     },
   ];
 
-  // Check for vault bootstrap patch (registered by straja-vault plugin).
-  // When present, ALL bootstrap file reads go through the vault — no disk access.
-  const g = globalThis as Record<symbol, unknown>;
-  const patchFactory = g[BOOTSTRAP_PATCH_KEY] as
-    | (() => (filename: string) => Promise<string | null>)
-    | undefined;
-  const vaultLoader = patchFactory?.();
-
-  if (vaultLoader) {
-    // Vault-backed loading: fetch each file from the vault's _workspace collection.
-    // MEMORY.md is NOT included — it lives in the vault's _memory collection and
-    // is injected separately via the before_prompt_build hook. Including it here
-    // would cause double injection.
-    const result: WorkspaceBootstrapFile[] = [];
-    for (const entry of entries) {
-      const content = await vaultLoader(entry.name);
-      if (content !== null) {
-        result.push({ name: entry.name, path: entry.filePath, content, missing: false });
-      } else {
-        result.push({ name: entry.name, path: entry.filePath, missing: true });
-      }
-    }
-    return result;
-  }
-
-  // Original disk-backed loading (only when vault plugin is NOT loaded).
-  entries.push(...(await resolveMemoryBootstrapEntries(resolvedDir)));
-
+  const vaultLoader = requireVaultBootstrapLoader("loadWorkspaceBootstrapFiles");
   const result: WorkspaceBootstrapFile[] = [];
   for (const entry of entries) {
-    try {
-      const content = await readFileWithCache(entry.filePath);
-      result.push({
-        name: entry.name,
-        path: entry.filePath,
-        content,
-        missing: false,
-      });
-    } catch {
+    const content = await vaultLoader(entry.name);
+    if (content !== null) {
+      result.push({ name: entry.name, path: entry.filePath, content, missing: false });
+    } else {
       result.push({ name: entry.name, path: entry.filePath, missing: true });
     }
   }
@@ -601,107 +480,33 @@ export async function loadExtraBootstrapFiles(
     return [];
   }
 
-  // Vault mode: use bootstrap patch loader instead of fs.glob + disk reads
-  const vaultLoader = resolveVaultBootstrapLoader();
-  if (vaultLoader) {
-    const result: WorkspaceBootstrapFile[] = [];
-    // In vault mode, we resolve patterns to basenames and load each from vault.
-    // The vault doesn't support glob, but extra bootstrap patterns are typically
-    // literal filenames or simple patterns resolving to known bootstrap names.
-    const filenames = new Set<string>();
-    for (const pattern of extraPatterns) {
-      // Extract basename — if it's a glob, iterate known bootstrap names that match
-      if (pattern.includes("*") || pattern.includes("?") || pattern.includes("{")) {
-        // For glob patterns, check all valid bootstrap names against the pattern
-        for (const name of VALID_BOOTSTRAP_NAMES) {
-          // Simple glob matching: *.md matches all .md files, **/*.md too
-          if (pattern === "*.md" || pattern === "**/*.md" || pattern.endsWith("/" + name)) {
-            filenames.add(name);
-          }
-        }
-      } else {
-        const baseName = path.basename(pattern);
-        if (VALID_BOOTSTRAP_NAMES.has(baseName)) {
-          filenames.add(baseName);
-        }
-      }
-    }
-
-    for (const filename of filenames) {
-      try {
-        const content = await vaultLoader(filename);
-        if (content !== null) {
-          result.push({
-            name: filename as WorkspaceBootstrapFileName,
-            path: path.join(resolveUserPath(dir), filename),
-            content,
-            missing: false,
-          });
-        }
-      } catch {
-        // Vault unreachable for this file — skip
-      }
-    }
-    return result;
-  }
-
-  // No vault (shouldn't happen in production)
-  const resolvedDir = resolveUserPath(dir);
-  let realResolvedDir = resolvedDir;
-  try {
-    realResolvedDir = await fs.realpath(resolvedDir);
-  } catch {
-    // Keep lexical root if realpath fails.
-  }
-
-  // Resolve glob patterns into concrete file paths
-  const resolvedPaths = new Set<string>();
+  const vaultLoader = requireVaultBootstrapLoader("loadExtraBootstrapFiles");
+  const result: WorkspaceBootstrapFile[] = [];
+  const filenames = new Set<string>();
   for (const pattern of extraPatterns) {
     if (pattern.includes("*") || pattern.includes("?") || pattern.includes("{")) {
-      try {
-        const matches = fs.glob(pattern, { cwd: resolvedDir });
-        for await (const m of matches) {
-          resolvedPaths.add(m);
+      for (const name of VALID_BOOTSTRAP_NAMES) {
+        if (pattern === "*.md" || pattern === "**/*.md" || pattern.endsWith("/" + name)) {
+          filenames.add(name);
         }
-      } catch {
-        // glob not available or pattern error — fall back to literal
-        resolvedPaths.add(pattern);
       }
     } else {
-      resolvedPaths.add(pattern);
+      const baseName = path.basename(pattern);
+      if (VALID_BOOTSTRAP_NAMES.has(baseName)) {
+        filenames.add(baseName);
+      }
     }
   }
 
-  const result: WorkspaceBootstrapFile[] = [];
-  for (const relPath of resolvedPaths) {
-    const filePath = path.resolve(resolvedDir, relPath);
-    // Guard against path traversal — resolved path must stay within workspace
-    if (!filePath.startsWith(resolvedDir + path.sep) && filePath !== resolvedDir) {
-      continue;
-    }
-    try {
-      // Resolve symlinks and verify the real path is still within workspace
-      const realFilePath = await fs.realpath(filePath);
-      if (
-        !realFilePath.startsWith(realResolvedDir + path.sep) &&
-        realFilePath !== realResolvedDir
-      ) {
-        continue;
-      }
-      // Only load files whose basename is a recognized bootstrap filename
-      const baseName = path.basename(relPath);
-      if (!VALID_BOOTSTRAP_NAMES.has(baseName)) {
-        continue;
-      }
-      const content = await readFileWithCache(realFilePath);
+  for (const filename of filenames) {
+    const content = await vaultLoader(filename);
+    if (content !== null) {
       result.push({
-        name: baseName as WorkspaceBootstrapFileName,
-        path: filePath,
+        name: filename as WorkspaceBootstrapFileName,
+        path: path.join(resolveUserPath(dir), filename),
         content,
         missing: false,
       });
-    } catch {
-      // Silently skip missing extra files
     }
   }
   return result;

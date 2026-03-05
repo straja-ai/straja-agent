@@ -1,9 +1,8 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
+
+const SESSION_STORE_PATCH_KEY = Symbol.for("openclaw.sessionStorePatchCallback");
 
 describe("getSubagentDepthFromSessionStore", () => {
   it("uses spawnDepth from the session store when available", () => {
@@ -45,35 +44,41 @@ describe("getSubagentDepthFromSessionStore", () => {
   });
 
   it("resolves prefixed store keys when caller key omits the agent prefix", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-subagent-depth-"));
-    const storeTemplate = path.join(tmpDir, "sessions-{agentId}.json");
+    const storeTemplate = "/tmp/openclaw-subagent-depth/sessions-{agentId}.json";
     const prefixedKey = "agent:main:subagent:flat";
     const storePath = storeTemplate.replaceAll("{agentId}", "main");
-    fs.writeFileSync(
-      storePath,
-      JSON.stringify(
-        {
-          [prefixedKey]: {
-            sessionId: "subagent-flat",
-            updatedAt: Date.now(),
-            spawnDepth: 2,
-          },
-        },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
-
-    const depth = getSubagentDepthFromSessionStore("subagent:flat", {
-      cfg: {
-        session: {
-          store: storeTemplate,
-        },
+    const sessionStore = {
+      [prefixedKey]: {
+        sessionId: "subagent-flat",
+        updatedAt: Date.now(),
+        spawnDepth: 2,
       },
+    };
+    const g = globalThis as Record<symbol, unknown>;
+    const previous = g[SESSION_STORE_PATCH_KEY];
+    g[SESSION_STORE_PATCH_KEY] = () => ({
+      loadSessionStore: (candidateStorePath: string) =>
+        candidateStorePath === storePath ? sessionStore : {},
+      saveSessionStore: () => undefined,
     });
 
-    expect(depth).toBe(2);
+    try {
+      const depth = getSubagentDepthFromSessionStore("subagent:flat", {
+        cfg: {
+          session: {
+            store: storeTemplate,
+          },
+        },
+      });
+
+      expect(depth).toBe(2);
+    } finally {
+      if (previous === undefined) {
+        delete g[SESSION_STORE_PATCH_KEY];
+      } else {
+        g[SESSION_STORE_PATCH_KEY] = previous;
+      }
+    }
   });
 
   it("falls back to session-key segment counting when metadata is missing", () => {

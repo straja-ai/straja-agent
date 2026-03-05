@@ -311,6 +311,9 @@ export function createOpenClawCodingTools(options?: {
   // operation wrappers that resolve the vault callback on first invocation — by
   // then plugins have loaded and registered the callback.
   const FS_TOOLS_PATCH_KEY = Symbol.for("openclaw.fsToolsPatchCallback");
+  const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+  const SESSION_STORE_PATCH_KEY = Symbol.for("openclaw.sessionStorePatchCallback");
+  const SUBAGENT_REGISTRY_PATCH_KEY = Symbol.for("openclaw.subagentRegistryPatchCallback");
   type VaultOpsResult = {
     readOperations: {
       readFile: (p: string) => Promise<Buffer>;
@@ -563,13 +566,40 @@ export function createOpenClawCodingTools(options?: {
       senderIsOwner: options?.senderIsOwner,
     }),
   ];
-  // When vault FS patch is active, rename read/write/edit → vault_read/vault_write/vault_edit
-  // so the tool names make it explicit that operations go through the vault, not disk.
+  {
+    const g = globalThis as Record<symbol, unknown>;
+    const vaultBaseUrl = g[VAULT_READER_KEY];
+    if (typeof vaultBaseUrl !== "string" || !vaultBaseUrl.trim()) {
+      throw new Error(
+        "[vault] createOpenClawCodingTools: vault session base URL missing; refusing non-vault runtime",
+      );
+    }
+    if (typeof g[FS_TOOLS_PATCH_KEY] !== "function") {
+      throw new Error("[vault] createOpenClawCodingTools: fs-tools patch callback missing");
+    }
+    if (typeof g[SESSION_STORE_PATCH_KEY] !== "function") {
+      throw new Error("[vault] createOpenClawCodingTools: session-store patch callback missing");
+    }
+    if (typeof g[SUBAGENT_REGISTRY_PATCH_KEY] !== "function") {
+      throw new Error(
+        "[vault] createOpenClawCodingTools: subagent-registry patch callback missing",
+      );
+    }
+  }
+  // When vault FS patch is active, rename core workspace/session tools to vault_* names
+  // so the tool names make it explicit that operations go through vault-backed storage.
   // This runs AFTER createOpenClawTools() which loads plugins and registers the vault callback.
   const VAULT_TOOL_RENAMES: Record<string, string> = {
     read: "vault_read",
     write: "vault_write",
     edit: "vault_edit",
+    agents_list: "vault_agents_list",
+    sessions_list: "vault_sessions_list",
+    sessions_history: "vault_sessions_history",
+    sessions_send: "vault_sessions_send",
+    sessions_spawn: "vault_sessions_spawn",
+    subagents: "vault_subagents",
+    session_status: "vault_session_status",
   };
   if (resolveVaultOps()) {
     for (const tool of tools) {

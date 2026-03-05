@@ -9,6 +9,7 @@ import type { MsgContext } from "../../auto-reply/templating.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveSessionFilePath } from "../../config/sessions.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import {
   abortChatRunById,
@@ -385,6 +386,7 @@ function appendAssistantTranscriptMessage(params: {
   try {
     // IMPORTANT: Use SessionManager so the entry is attached to the current leaf via parentId.
     // Raw jsonl appends break the parent chain and can hide compaction summaries from context.
+    ensureVaultSessionManagerPatched("appendAssistantTranscriptMessage");
     const sessionManager = SessionManager.open(transcriptPath);
     const messageId = sessionManager.appendMessage(messageBody);
     return { ok: true, messageId, message: messageBody };

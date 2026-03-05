@@ -147,11 +147,17 @@ function buildMessagingSection(params: {
   if (params.isMinimal) {
     return [];
   }
+  const crossSessionSendTool = params.availableTools.has("vault_sessions_send")
+    ? "vault_sessions_send"
+    : "sessions_send";
+  const subagentsTool = params.availableTools.has("vault_subagents")
+    ? "vault_subagents"
+    : "subagents";
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    "- Cross-session messaging → use sessions_send(sessionKey, message)",
-    "- Sub-agent orchestration → use subagents(action=list|steer|kill)",
+    `- Cross-session messaging → use ${crossSessionSendTool}(sessionKey, message)`,
+    `- Sub-agent orchestration → use ${subagentsTool}(action=list|steer|kill)`,
     "- `[System Message] ...` blocks are internal context and are not user-visible by default.",
     `- If a \`[System Message]\` reports completed cron/subagent work and asks for a user update, rewrite it in your normal assistant voice and send that update (do not forward raw system text or default to ${SILENT_REPLY_TOKEN}).`,
     "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
@@ -393,13 +399,21 @@ export function buildAgentSystemPrompt(params: {
     message: "Send messages and channel actions",
     gateway: "Restart, apply config, or run updates on the running OpenClaw process",
     agents_list: "List agent ids allowed for sessions_spawn",
+    vault_agents_list: "List agent ids allowed for vault_sessions_spawn",
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
+    vault_sessions_list: "List other sessions (incl. sub-agents) with filters/last",
     sessions_history: "Fetch history for another session/sub-agent",
+    vault_sessions_history: "Fetch history for another session/sub-agent",
     sessions_send: "Send a message to another session/sub-agent",
+    vault_sessions_send: "Send a message to another session/sub-agent",
     sessions_spawn: "Spawn a sub-agent session",
+    vault_sessions_spawn: "Spawn a sub-agent session",
     subagents: "List, steer, or kill sub-agent runs for this requester session",
+    vault_subagents: "List, steer, or kill sub-agent runs for this requester session",
     session_status:
       "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 session_status); optional per-session model override",
+    vault_session_status:
+      "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 vault_session_status); optional per-session model override",
     image: "Analyze an image with the configured image model",
   };
 
@@ -422,11 +436,19 @@ export function buildAgentSystemPrompt(params: {
     "message",
     "gateway",
     "agents_list",
+    "vault_agents_list",
     "sessions_list",
+    "vault_sessions_list",
     "sessions_history",
+    "vault_sessions_history",
     "sessions_send",
+    "vault_sessions_send",
+    "sessions_spawn",
+    "vault_sessions_spawn",
     "subagents",
+    "vault_subagents",
     "session_status",
+    "vault_session_status",
     "image",
   ];
 
@@ -472,6 +494,40 @@ export function buildAgentSystemPrompt(params: {
   const readToolName = resolveToolName("read");
   const execToolName = resolveToolName("exec");
   const processToolName = resolveToolName("process");
+  const resolvePreferredToolName = (
+    primary: string,
+    secondary: string,
+    fallback: string,
+  ): string => {
+    if (availableTools.has(primary)) {
+      return resolveToolName(primary);
+    }
+    if (availableTools.has(secondary)) {
+      return resolveToolName(secondary);
+    }
+    return fallback;
+  };
+  const sessionsListToolName = resolvePreferredToolName(
+    "vault_sessions_list",
+    "sessions_list",
+    "sessions_list",
+  );
+  const sessionsHistoryToolName = resolvePreferredToolName(
+    "vault_sessions_history",
+    "sessions_history",
+    "sessions_history",
+  );
+  const sessionsSendToolName = resolvePreferredToolName(
+    "vault_sessions_send",
+    "sessions_send",
+    "sessions_send",
+  );
+  const subagentsToolName = resolvePreferredToolName("vault_subagents", "subagents", "subagents");
+  const sessionStatusToolName = resolvePreferredToolName(
+    "vault_session_status",
+    "session_status",
+    "session_status",
+  );
   const extraSystemPrompt = params.extraSystemPrompt?.trim();
   const ownerNumbers = (params.ownerNumbers ?? []).map((value) => value.trim()).filter(Boolean);
   const ownerLine =
@@ -578,16 +634,16 @@ export function buildAgentSystemPrompt(params: {
           "- canvas: present/eval/snapshot the Canvas",
           "- nodes: list/describe/notify/camera/screen on paired nodes",
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
-          "- sessions_list: list sessions",
-          "- sessions_history: fetch session history",
-          "- sessions_send: send to another session",
-          "- subagents: list/steer/kill sub-agent runs",
-          '- session_status: show usage/time/model state and answer "what model are we using?"',
+          `- ${sessionsListToolName}: list sessions`,
+          `- ${sessionsHistoryToolName}: fetch session history`,
+          `- ${sessionsSendToolName}: send to another session`,
+          `- ${subagentsToolName}: list/steer/kill sub-agent runs`,
+          `- ${sessionStatusToolName}: show usage/time/model state and answer "what model are we using?"`,
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
     "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
-    "Do not poll `subagents list` / `sessions_list` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).",
+    `Do not poll \`${subagentsToolName} list\` / \`${sessionsListToolName}\` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).`,
     "",
     "## Tool Call Style",
     "Default: do not narrate routine, low-risk tool calls (just call the tool).",
@@ -633,7 +689,7 @@ export function buildAgentSystemPrompt(params: {
       : "",
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal ? "" : "",
     userTimezone
-      ? "If you need the current date, time, or day of week, run session_status (📊 session_status)."
+      ? `If you need the current date, time, or day of week, run ${sessionStatusToolName} (📊 ${sessionStatusToolName}).`
       : "",
     "## Workspace",
     `Your working directory is: ${displayWorkspaceDir}`,

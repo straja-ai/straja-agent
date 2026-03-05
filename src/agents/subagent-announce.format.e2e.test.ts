@@ -353,6 +353,59 @@ describe("subagent announce formatting", () => {
     expect(msg).not.toContain("Convert the result above into your normal assistant voice");
   });
 
+  it("retries manual completion direct-send with PDF attachment when Telegram rejects oversize message", async () => {
+    const { runSubagentAnnounceFlow } = await import("./subagent-announce.js");
+    const oversized = `<${"x".repeat(5000)}>`;
+    sessionStore = {
+      "agent:main:subagent:test": {
+        sessionId: "child-session-direct-oversized",
+      },
+      "agent:main:main": {
+        sessionId: "requester-session-oversized",
+      },
+    };
+    chatHistoryMock.mockResolvedValueOnce({
+      messages: [{ role: "assistant", content: [{ type: "text", text: oversized }] }],
+    });
+    sendSpy
+      .mockRejectedValueOnce(
+        new Error(
+          "GrammyError: Call to 'sendMessage' failed! (400: Bad Request: message is too long)",
+        ),
+      )
+      .mockResolvedValueOnce({ runId: "send-truncated", status: "ok" });
+
+    const didAnnounce = await runSubagentAnnounceFlow({
+      childSessionKey: "agent:main:subagent:test",
+      childRunId: "run-direct-completion-oversized",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      requesterOrigin: { channel: "telegram", to: "telegram:12345", accountId: "acct-1" },
+      ...defaultOutcomeAnnounce,
+      expectsCompletionMessage: true,
+    });
+
+    expect(didAnnounce).toBe(true);
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(agentSpy).not.toHaveBeenCalled();
+    const firstCall = sendSpy.mock.calls[0]?.[0] as { params?: Record<string, unknown> };
+    const secondCall = sendSpy.mock.calls[1]?.[0] as { params?: Record<string, unknown> };
+    const firstRawMessage = firstCall?.params?.message;
+    const secondRawMessage = secondCall?.params?.message;
+    const firstMessage = typeof firstRawMessage === "string" ? firstRawMessage : "";
+    const secondMessage = typeof secondRawMessage === "string" ? secondRawMessage : "";
+    expect(secondCall?.params?.idempotencyKey).toBe(
+      "announce:v1:agent:main:subagent:test:run-direct-completion-oversized:pdf",
+    );
+    expect(secondMessage).toContain("Full output attached as PDF report.");
+    const rawMediaUrl = secondCall?.params?.mediaUrl;
+    expect(typeof rawMediaUrl).toBe("string");
+    const mediaUrl = typeof rawMediaUrl === "string" ? rawMediaUrl : "";
+    expect(mediaUrl).toContain("subagent-completion-report-");
+    expect(mediaUrl).toMatch(/\.pdf$/);
+    expect(secondMessage.length).toBeLessThan(firstMessage.length + 200);
+  });
+
   it("ignores stale session thread hints for manual completion direct-send", async () => {
     const { runSubagentAnnounceFlow } = await import("./subagent-announce.js");
     sessionStore = {

@@ -7,11 +7,13 @@ const MUTATING_TOOL_NAMES = new Set([
   "process",
   "message",
   "sessions_send",
+  "vault_sessions_send",
   "vault_cron",
   "gateway",
   "canvas",
   "nodes",
   "session_status",
+  "vault_session_status",
 ]);
 
 const READ_ONLY_ACTIONS = new Set([
@@ -107,6 +109,7 @@ export function isMutatingToolCall(toolName: string, args: unknown): boolean {
     case "exec":
     case "bash":
     case "sessions_send":
+    case "vault_sessions_send":
       return true;
     case "process":
       return action != null && PROCESS_MUTATING_ACTIONS.has(action);
@@ -117,6 +120,7 @@ export function isMutatingToolCall(toolName: string, args: unknown): boolean {
         typeof record?.message === "string"
       );
     case "session_status":
+    case "vault_session_status":
       return typeof record?.model === "string" && record.model.trim().length > 0;
     default: {
       if (normalized === "vault_cron" || normalized === "gateway" || normalized === "canvas") {

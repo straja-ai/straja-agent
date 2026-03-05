@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureAuthProfileStore } from "./auth-profiles.js";
 import type { AuthProfileCredential } from "./auth-profiles/types.js";
@@ -25,6 +24,14 @@ function resolveVaultWorkspaceOps(): VaultWorkspaceOps | undefined {
   return factory?.();
 }
 
+function requireVaultWorkspaceOps(context: string): VaultWorkspaceOps {
+  const ops = resolveVaultWorkspaceOps();
+  if (ops) {
+    return ops;
+  }
+  throw new Error(`[vault] ${context}: workspace patch is missing; refusing disk fallback`);
+}
+
 // ---------------------------------------------------------------------------
 
 type AuthJsonCredential =
@@ -43,35 +50,17 @@ type AuthJsonCredential =
 type AuthJsonShape = Record<string, AuthJsonCredential>;
 
 async function readAuthJson(filePath: string): Promise<AuthJsonShape> {
-  // Vault mode: read from vault _workspace collection
-  const vaultOps = resolveVaultWorkspaceOps();
-  if (vaultOps) {
-    try {
-      const raw = await vaultOps.readFile(AUTH_JSON_VAULT_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as unknown;
-        if (parsed && typeof parsed === "object") {
-          return parsed as AuthJsonShape;
-        }
-      }
-      return {};
-    } catch {
-      // Vault unreachable — no fallback to disk
-      return {};
-    }
-  }
-
-  // No vault (shouldn't happen in production)
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") {
-      return {};
-    }
-    return parsed as AuthJsonShape;
-  } catch {
+  void filePath;
+  const vaultOps = requireVaultWorkspaceOps("readAuthJson");
+  const raw = await vaultOps.readFile(AUTH_JSON_VAULT_KEY);
+  if (!raw) {
     return {};
   }
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("vault auth.json payload is not an object");
+  }
+  return parsed as AuthJsonShape;
 }
 
 /**
@@ -195,16 +184,7 @@ export async function ensurePiAuthJsonFromAuthProfiles(agentDir: string): Promis
 
   const payload = `${JSON.stringify(existing, null, 2)}\n`;
 
-  // Vault mode: write to vault _workspace collection
-  const vaultOps = resolveVaultWorkspaceOps();
-  if (vaultOps) {
-    await vaultOps.writeFile(AUTH_JSON_VAULT_KEY, payload);
-    return { wrote: true, authPath };
-  }
-
-  // No vault (shouldn't happen in production)
-  await fs.mkdir(agentDir, { recursive: true, mode: 0o700 });
-  await fs.writeFile(authPath, payload, { mode: 0o600 });
-
+  const vaultOps = requireVaultWorkspaceOps("ensurePiAuthJsonFromAuthProfiles");
+  await vaultOps.writeFile(AUTH_JSON_VAULT_KEY, payload);
   return { wrote: true, authPath };
 }

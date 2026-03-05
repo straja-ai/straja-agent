@@ -1,6 +1,6 @@
-import { Buffer } from "node:buffer";
-import fs from "node:fs/promises";
 import { isCacheEnabled, resolveCacheTtlMs } from "../../config/cache-utils.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
 
 type SessionManagerCacheEntry = {
   sessionFile: string;
@@ -46,24 +46,16 @@ function isSessionManagerCached(sessionFile: string): boolean {
 }
 
 export async function prewarmSessionFile(sessionFile: string): Promise<void> {
+  const g = globalThis as Record<symbol, unknown>;
+  const vaultBaseUrl = g[VAULT_READER_KEY];
+  if (typeof vaultBaseUrl !== "string" || !vaultBaseUrl.trim()) {
+    throw new Error("[vault] prewarmSessionFile: vault session base URL is missing");
+  }
   if (!isSessionManagerCacheEnabled()) {
     return;
   }
   if (isSessionManagerCached(sessionFile)) {
     return;
   }
-
-  try {
-    // Read a small chunk to encourage OS page cache warmup.
-    const handle = await fs.open(sessionFile, "r");
-    try {
-      const buffer = Buffer.alloc(4096);
-      await handle.read(buffer, 0, buffer.length, 0);
-    } finally {
-      await handle.close();
-    }
-    trackSessionManagerAccess(sessionFile);
-  } catch {
-    // File doesn't exist yet, SessionManager will create it
-  }
+  trackSessionManagerAccess(sessionFile);
 }

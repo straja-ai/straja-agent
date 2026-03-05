@@ -4,8 +4,6 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
   createAgentSession,
   estimateTokens,
-  migrateSessionEntries,
-  parseSessionEntries,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -19,6 +17,7 @@ import { flushPluginSetup } from "../../plugins/registry.js";
 import { getActivePluginRegistry } from "../../plugins/runtime.js";
 import { type enqueueCommand, enqueueCommandInLane } from "../../process/command-queue.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import { resolveSignalReactionLevel } from "../../signal/reaction-level.js";
 import { resolveTelegramInlineButtonsScope } from "../../telegram/inline-buttons.js";
 import { resolveTelegramReactionLevel } from "../../telegram/reaction-level.js";
@@ -44,13 +43,8 @@ import {
 import { applyPiCompactionSettingsFromConfig } from "../pi-settings.js";
 import { createOpenClawCodingTools } from "../pi-tools.js";
 import { resolveSandboxContext } from "../sandbox.js";
-import { repairSessionFileIfNeeded } from "../session-file-repair.js";
 import { guardSessionManager } from "../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../session-transcript-repair.js";
-import {
-  acquireSessionWriteLock,
-  resolveSessionLockMaxHoldFromTimeout,
-} from "../session-write-lock.js";
 import { detectRuntimeShell } from "../shell-utils.js";
 import {
   applySkillEnvOverrides,
@@ -60,10 +54,8 @@ import {
   type SkillSnapshot,
 } from "../skills.js";
 import { resolveTranscriptPolicy } from "../transcript-policy.js";
-import {
-  compactWithSafetyTimeout,
-  EMBEDDED_COMPACTION_TIMEOUT_MS,
-} from "./compaction-safety-timeout.js";
+import { assertVaultRuntimeReady } from "../vault-runtime.js";
+import { compactWithSafetyTimeout } from "./compaction-safety-timeout.js";
 import { buildEmbeddedExtensionPaths } from "./extensions.js";
 import {
   logToolSchemasForGoogle,
@@ -75,7 +67,7 @@ import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
 import { log } from "./logger.js";
 import { buildModelAliasLines, resolveModel } from "./model.js";
 import { buildEmbeddedSandboxInfo } from "./sandbox-info.js";
-import { prewarmSessionFile, trackSessionManagerAccess } from "./session-manager-cache.js";
+import { trackSessionManagerAccess } from "./session-manager-cache.js";
 import {
   applySystemPromptOverrideToSession,
   buildEmbeddedSystemPrompt,
@@ -248,6 +240,7 @@ function classifyCompactionReason(reason?: string): string {
 export async function compactEmbeddedPiSessionDirect(
   params: CompactEmbeddedPiSessionParams,
 ): Promise<EmbeddedPiCompactResult> {
+  await assertVaultRuntimeReady("compactEmbeddedPiSessionDirect");
   const startedAt = Date.now();
   const diagId = params.diagId?.trim() || createCompactionDiagId();
   const trigger = params.trigger ?? "manual";
@@ -509,36 +502,20 @@ export async function compactEmbeddedPiSessionDirect(
     });
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
 
-    const sessionLock = await acquireSessionWriteLock({
-      sessionFile: params.sessionFile,
-      maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
-        timeoutMs: EMBEDDED_COMPACTION_TIMEOUT_MS,
-      }),
-    });
+    const sessionLock = { release: async () => undefined };
     try {
-      await repairSessionFileIfNeeded({
-        sessionFile: params.sessionFile,
-        warn: (message) => log.warn(message),
-      });
-      await prewarmSessionFile(params.sessionFile);
       const transcriptPolicy = resolveTranscriptPolicy({
         modelApi: model.api,
         provider,
         modelId,
       });
-      // Invoke any session patch callback registered by plugins on globalThis.
-      const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
-      const g = globalThis as Record<symbol, unknown>;
-      if (typeof g[SESSION_PATCH_KEY] === "function") {
-        g[SESSION_PATCH_KEY](SessionManager, parseSessionEntries, migrateSessionEntries);
-        delete g[SESSION_PATCH_KEY];
-      }
 
       // Flush any async plugin setup promises.
       const pluginRegistry = getActivePluginRegistry();
       if (pluginRegistry) {
         await flushPluginSetup(pluginRegistry);
       }
+      ensureVaultSessionManagerPatched("compactEmbeddedPiSessionDirect");
 
       const sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,

@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -22,14 +21,43 @@ import type { SessionPreviewItem } from "./session-utils.types.js";
 const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
 const VAULT_COLLECTION = "_sessions";
 
+function normalizeVaultBaseUrl(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
 function getVaultBaseUrl(): string | null {
   const g = globalThis as Record<symbol, unknown>;
-  const url = g[VAULT_READER_KEY];
-  if (typeof url === "string") {
-    return url;
+  const fromGlobal = normalizeVaultBaseUrl(g[VAULT_READER_KEY]);
+  if (fromGlobal) {
+    return fromGlobal;
   }
-  // Fallback to env var (always available, even before plugin registers)
-  return process.env.STRAJA_VAULT_URL || "http://localhost:8181";
+  return null;
+}
+
+function requireVaultBaseUrl(context: string): string {
+  const baseUrl = getVaultBaseUrl();
+  if (baseUrl) {
+    return baseUrl;
+  }
+  throw new Error(`[vault] ${context}: vault session base URL missing; refusing disk fallback`);
 }
 
 /**
@@ -55,13 +83,16 @@ function vaultGet(baseUrl: string, key: string): string | null {
     const lines = result.trimEnd().split("\n");
     const statusLine = lines.pop() || "0";
     const status = parseInt(statusLine, 10);
-    if (status !== 200) {
+    if (status === 404) {
       return null;
+    }
+    if (status !== 200) {
+      throw new Error(`Vault session read failed (${status})`);
     }
     const body = lines.join("\n");
     return body.trim() ? body : null;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`Vault session GET ${url} failed: ${String(err)}`, { cause: err });
   }
 }
 
@@ -72,15 +103,29 @@ function vaultGet(baseUrl: string, key: string): string | null {
 export function vaultWriteSessionContent(candidates: string[], content: string): void {
   const baseUrl = getVaultBaseUrl();
   if (!baseUrl) {
-    return;
+    throw new Error("Vault session storage is not configured");
+  }
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    throw new Error("No session transcript candidates provided");
   }
 
   const key = pathToVaultKey(candidates[0]);
   const url = `${baseUrl}/raw/${VAULT_COLLECTION}/${encodeURIComponent(key)}`;
   try {
-    execFileSync(
+    const statusRaw = execFileSync(
       "curl",
-      ["-s", "-X", "PUT", "-H", "Content-Type: text/plain", "--data-binary", "@-", url],
+      [
+        "-s",
+        "-w",
+        "\n%{http_code}",
+        "-X",
+        "PUT",
+        "-H",
+        "Content-Type: text/plain",
+        "--data-binary",
+        "@-",
+        url,
+      ],
       {
         input: content,
         encoding: "utf-8",
@@ -89,8 +134,12 @@ export function vaultWriteSessionContent(candidates: string[], content: string):
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
+    const status = Number.parseInt(statusRaw.trim().split("\n").pop() || "0", 10);
+    if (!Number.isFinite(status) || status < 200 || status >= 300) {
+      throw new Error(`Vault session PUT failed (${status})`);
+    }
   } catch (err) {
-    console.error(`[vault-session] PUT ${url} failed: ${String(err)}`);
+    throw new Error(`Vault session PUT ${url} failed: ${String(err)}`, { cause: err });
   }
 }
 
@@ -103,10 +152,7 @@ export { getVaultBaseUrl };
  * JSONL string on success, or null if not found.
  */
 export function readVaultSessionContent(candidates: string[]): string | null {
-  const baseUrl = getVaultBaseUrl();
-  if (!baseUrl) {
-    return null;
-  }
+  const baseUrl = requireVaultBaseUrl("readVaultSessionContent");
 
   // Deduplicate vault keys (multiple paths may yield the same filename)
   const triedKeys = new Set<string>();
@@ -130,62 +176,12 @@ type SessionTitleFields = {
   lastMessagePreview: string | null;
 };
 
-type SessionTitleFieldsCacheEntry = SessionTitleFields & {
-  mtimeMs: number;
-  size: number;
-};
-
-const sessionTitleFieldsCache = new Map<string, SessionTitleFieldsCacheEntry>();
-const MAX_SESSION_TITLE_FIELDS_CACHE_ENTRIES = 5000;
-
-function _readSessionTitleFieldsCacheKey(
-  filePath: string,
-  opts?: { includeInterSession?: boolean },
-) {
-  const includeInterSession = opts?.includeInterSession === true ? "1" : "0";
-  return `${filePath}\t${includeInterSession}`;
-}
-
-function _getCachedSessionTitleFields(cacheKey: string, stat: fs.Stats): SessionTitleFields | null {
-  const cached = sessionTitleFieldsCache.get(cacheKey);
-  if (!cached) {
-    return null;
-  }
-  if (cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-    sessionTitleFieldsCache.delete(cacheKey);
-    return null;
-  }
-  // LRU bump
-  sessionTitleFieldsCache.delete(cacheKey);
-  sessionTitleFieldsCache.set(cacheKey, cached);
-  return {
-    firstUserMessage: cached.firstUserMessage,
-    lastMessagePreview: cached.lastMessagePreview,
-  };
-}
-
-function _setCachedSessionTitleFields(cacheKey: string, stat: fs.Stats, value: SessionTitleFields) {
-  sessionTitleFieldsCache.set(cacheKey, {
-    ...value,
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-  });
-  while (sessionTitleFieldsCache.size > MAX_SESSION_TITLE_FIELDS_CACHE_ENTRIES) {
-    const oldestKey = sessionTitleFieldsCache.keys().next().value;
-    if (typeof oldestKey !== "string" || !oldestKey) {
-      break;
-    }
-    sessionTitleFieldsCache.delete(oldestKey);
-  }
-}
-
 export function readSessionMessages(
   sessionId: string,
   storePath: string | undefined,
   sessionFile?: string,
 ): unknown[] {
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile);
-
   const rawText = readVaultSessionContent(candidates);
   if (!rawText) {
     return [];
@@ -274,10 +270,9 @@ export function resolveSessionTranscriptCandidates(
 export type ArchiveFileReason = "bak" | "reset" | "deleted";
 
 export function archiveFileOnDisk(filePath: string, reason: ArchiveFileReason): string {
-  const ts = new Date().toISOString().replaceAll(":", "-");
-  const archived = `${filePath}.${reason}.${ts}`;
-  fs.renameSync(filePath, archived);
-  return archived;
+  throw new Error(
+    `[vault] archiveFileOnDisk: disk archive is disabled in vault-only mode (${filePath}, ${reason})`,
+  );
 }
 
 /**
@@ -291,45 +286,9 @@ export function archiveSessionTranscripts(opts: {
   agentId?: string;
   reason: "reset" | "deleted";
 }): string[] {
-  const archived: string[] = [];
-  for (const candidate of resolveSessionTranscriptCandidates(
-    opts.sessionId,
-    opts.storePath,
-    opts.sessionFile,
-    opts.agentId,
-  )) {
-    if (!fs.existsSync(candidate)) {
-      continue;
-    }
-    try {
-      archived.push(archiveFileOnDisk(candidate, opts.reason));
-    } catch {
-      // Best-effort.
-    }
-  }
-  return archived;
-}
-
-function restoreArchiveTimestamp(raw: string): string {
-  const [datePart, timePart] = raw.split("T");
-  if (!datePart || !timePart) {
-    return raw;
-  }
-  return `${datePart}T${timePart.replace(/-/g, ":")}`;
-}
-
-function parseArchivedTimestamp(fileName: string, reason: ArchiveFileReason): number | null {
-  const marker = `.${reason}.`;
-  const index = fileName.lastIndexOf(marker);
-  if (index < 0) {
-    return null;
-  }
-  const raw = fileName.slice(index + marker.length);
-  if (!raw) {
-    return null;
-  }
-  const timestamp = Date.parse(restoreArchiveTimestamp(raw));
-  return Number.isNaN(timestamp) ? null : timestamp;
+  void opts;
+  requireVaultBaseUrl("archiveSessionTranscripts");
+  return [];
 }
 
 export async function cleanupArchivedSessionTranscripts(opts: {
@@ -338,37 +297,9 @@ export async function cleanupArchivedSessionTranscripts(opts: {
   reason?: "deleted";
   nowMs?: number;
 }): Promise<{ removed: number; scanned: number }> {
-  if (!Number.isFinite(opts.olderThanMs) || opts.olderThanMs < 0) {
-    return { removed: 0, scanned: 0 };
-  }
-  const now = opts.nowMs ?? Date.now();
-  const reason: ArchiveFileReason = opts.reason ?? "deleted";
-  const directories = Array.from(new Set(opts.directories.map((dir) => path.resolve(dir))));
-  let removed = 0;
-  let scanned = 0;
-
-  for (const dir of directories) {
-    const entries = await fs.promises.readdir(dir).catch(() => []);
-    for (const entry of entries) {
-      const timestamp = parseArchivedTimestamp(entry, reason);
-      if (timestamp == null) {
-        continue;
-      }
-      scanned += 1;
-      if (now - timestamp <= opts.olderThanMs) {
-        continue;
-      }
-      const fullPath = path.join(dir, entry);
-      const stat = await fs.promises.stat(fullPath).catch(() => null);
-      if (!stat?.isFile()) {
-        continue;
-      }
-      await fs.promises.rm(fullPath).catch(() => undefined);
-      removed += 1;
-    }
-  }
-
-  return { removed, scanned };
+  void opts;
+  requireVaultBaseUrl("cleanupArchivedSessionTranscripts");
+  return { removed: 0, scanned: 0 };
 }
 
 function jsonUtf8Bytes(value: unknown): number {
@@ -412,14 +343,12 @@ export function readSessionTitleFieldsFromTranscript(
   agentId?: string,
   opts?: { includeInterSession?: boolean },
 ): SessionTitleFields {
+  requireVaultBaseUrl("readSessionTitleFieldsFromTranscript");
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-
   const content = readVaultSessionContent(candidates);
   if (!content) {
     return { firstUserMessage: null, lastMessagePreview: null };
   }
-
-  // Extract first user message from head
   let firstUserMessage: string | null = null;
   try {
     const headChunk = content.slice(0, 8192);
@@ -427,8 +356,6 @@ export function readSessionTitleFieldsFromTranscript(
   } catch {
     // ignore
   }
-
-  // Extract last message preview from tail
   let lastMessagePreview: string | null = null;
   try {
     const tailChunk = content.slice(-LAST_MSG_MAX_BYTES);
@@ -436,7 +363,6 @@ export function readSessionTitleFieldsFromTranscript(
   } catch {
     // ignore
   }
-
   return { firstUserMessage, lastMessagePreview };
 }
 
@@ -459,15 +385,6 @@ function extractTextFromContent(content: TranscriptMessage["content"]): string |
     }
   }
   return null;
-}
-
-function _readTranscriptHeadChunk(fd: number, maxBytes = 8192): string | null {
-  const buf = Buffer.alloc(maxBytes);
-  const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-  if (bytesRead <= 0) {
-    return null;
-  }
-  return buf.toString("utf-8", 0, bytesRead);
 }
 
 function extractFirstUserMessageFromTranscriptChunk(
@@ -499,31 +416,6 @@ function extractFirstUserMessageFromTranscriptChunk(
   return null;
 }
 
-function _findExistingTranscriptPath(
-  sessionId: string,
-  storePath: string | undefined,
-  sessionFile?: string,
-  agentId?: string,
-): string | null {
-  const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-  return candidates.find((p) => fs.existsSync(p)) ?? null;
-}
-
-function _withOpenTranscriptFd<T>(filePath: string, read: (fd: number) => T | null): T | null {
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(filePath, "r");
-    return read(fd);
-  } catch {
-    // file read error
-  } finally {
-    if (fd !== null) {
-      fs.closeSync(fd);
-    }
-  }
-  return null;
-}
-
 export function readFirstUserMessageFromTranscript(
   sessionId: string,
   storePath: string | undefined,
@@ -531,8 +423,8 @@ export function readFirstUserMessageFromTranscript(
   agentId?: string,
   opts?: { includeInterSession?: boolean },
 ): string | null {
+  requireVaultBaseUrl("readFirstUserMessageFromTranscript");
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-
   const content = readVaultSessionContent(candidates);
   if (!content) {
     return null;
@@ -567,26 +459,14 @@ function extractLastMessagePreviewFromChunk(chunk: string): string | null {
   return null;
 }
 
-function _readLastMessagePreviewFromOpenTranscript(params: {
-  fd: number;
-  size: number;
-}): string | null {
-  const readStart = Math.max(0, params.size - LAST_MSG_MAX_BYTES);
-  const readLen = Math.min(params.size, LAST_MSG_MAX_BYTES);
-  const buf = Buffer.alloc(readLen);
-  fs.readSync(params.fd, buf, 0, readLen, readStart);
-
-  return extractLastMessagePreviewFromChunk(buf.toString("utf-8"));
-}
-
 export function readLastMessagePreviewFromTranscript(
   sessionId: string,
   storePath: string | undefined,
   sessionFile?: string,
   agentId?: string,
 ): string | null {
+  requireVaultBaseUrl("readLastMessagePreviewFromTranscript");
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
-
   const content = readVaultSessionContent(candidates);
   if (!content) {
     return null;
@@ -595,7 +475,6 @@ export function readLastMessagePreviewFromTranscript(
   return extractLastMessagePreviewFromChunk(tailChunk);
 }
 
-const _PREVIEW_READ_SIZES = [64 * 1024, 256 * 1024, 1024 * 1024];
 const PREVIEW_MAX_LINES = 200;
 
 type TranscriptContentEntry = {
@@ -726,55 +605,6 @@ function buildPreviewItems(
   return items.slice(-maxItems);
 }
 
-function _readRecentMessagesFromTranscript(
-  filePath: string,
-  maxMessages: number,
-  readBytes: number,
-): TranscriptPreviewMessage[] {
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(filePath, "r");
-    const stat = fs.fstatSync(fd);
-    const size = stat.size;
-    if (size === 0) {
-      return [];
-    }
-
-    const readStart = Math.max(0, size - readBytes);
-    const readLen = Math.min(size, readBytes);
-    const buf = Buffer.alloc(readLen);
-    fs.readSync(fd, buf, 0, readLen, readStart);
-
-    const chunk = buf.toString("utf-8");
-    const lines = chunk.split(/\r?\n/).filter((l) => l.trim());
-    const tailLines = lines.slice(-PREVIEW_MAX_LINES);
-
-    const collected: TranscriptPreviewMessage[] = [];
-    for (let i = tailLines.length - 1; i >= 0; i--) {
-      const line = tailLines[i];
-      try {
-        const parsed = JSON.parse(line);
-        const msg = parsed?.message as TranscriptPreviewMessage | undefined;
-        if (msg && typeof msg === "object") {
-          collected.push(msg);
-          if (collected.length >= maxMessages) {
-            break;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
-    return collected.toReversed();
-  } catch {
-    return [];
-  } finally {
-    if (fd !== null) {
-      fs.closeSync(fd);
-    }
-  }
-}
-
 function extractRecentMessagesFromContent(
   content: string,
   maxMessages: number,
@@ -809,11 +639,11 @@ export function readSessionPreviewItemsFromTranscript(
   maxItems: number,
   maxChars: number,
 ): SessionPreviewItem[] {
+  requireVaultBaseUrl("readSessionPreviewItemsFromTranscript");
   const candidates = resolveSessionTranscriptCandidates(sessionId, storePath, sessionFile, agentId);
 
   const boundedItems = Math.max(1, Math.min(maxItems, 50));
   const boundedChars = Math.max(20, Math.min(maxChars, 2000));
-
   const content = readVaultSessionContent(candidates);
   if (!content) {
     return [];

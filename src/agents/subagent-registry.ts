@@ -77,11 +77,7 @@ function logAnnounceGiveUp(entry: SubagentRunRecord, reason: "retry-limit" | "ex
 }
 
 function persistSubagentRuns() {
-  try {
-    saveSubagentRegistryToDisk(subagentRuns);
-  } catch {
-    // ignore persistence failures
-  }
+  saveSubagentRegistryToDisk(subagentRuns);
 }
 
 const resumedRuns = new Set<string>();
@@ -181,31 +177,27 @@ function restoreSubagentRunsOnce() {
     return;
   }
   restoreAttempted = true;
-  try {
-    const restored = loadSubagentRegistryFromDisk();
-    if (restored.size === 0) {
-      return;
+  const restored = loadSubagentRegistryFromDisk();
+  if (restored.size === 0) {
+    return;
+  }
+  for (const [runId, entry] of restored.entries()) {
+    if (!runId || !entry) {
+      continue;
     }
-    for (const [runId, entry] of restored.entries()) {
-      if (!runId || !entry) {
-        continue;
-      }
-      // Keep any newer in-memory entries.
-      if (!subagentRuns.has(runId)) {
-        subagentRuns.set(runId, entry);
-      }
+    // Keep any newer in-memory entries.
+    if (!subagentRuns.has(runId)) {
+      subagentRuns.set(runId, entry);
     }
+  }
 
-    // Resume pending work.
-    ensureListener();
-    if ([...subagentRuns.values()].some((entry) => entry.archiveAtMs)) {
-      startSweeper();
-    }
-    for (const runId of subagentRuns.keys()) {
-      resumeSubagentRun(runId);
-    }
-  } catch {
-    // ignore restore failures
+  // Resume pending work.
+  ensureListener();
+  if ([...subagentRuns.values()].some((entry) => entry.archiveAtMs)) {
+    startSweeper();
+  }
+  for (const runId of subagentRuns.keys()) {
+    resumeSubagentRun(runId);
   }
 }
 
@@ -655,16 +647,10 @@ function findRunIdsByChildSessionKey(childSessionKey: string): string[] {
 
 function getRunsSnapshotForRead(): Map<string, SubagentRunRecord> {
   const merged = new Map<string, SubagentRunRecord>();
-  const shouldReadDisk = !(process.env.VITEST || process.env.NODE_ENV === "test");
-  if (shouldReadDisk) {
-    try {
-      // Registry state is persisted to disk so other worker processes (for
-      // example cron runners) can observe active children spawned elsewhere.
-      for (const [runId, entry] of loadSubagentRegistryFromDisk().entries()) {
-        merged.set(runId, entry);
-      }
-    } catch {
-      // Ignore disk read failures and fall back to local memory state.
+  const shouldLoadSharedRegistry = !(process.env.VITEST || process.env.NODE_ENV === "test");
+  if (shouldLoadSharedRegistry) {
+    for (const [runId, entry] of loadSubagentRegistryFromDisk().entries()) {
+      merged.set(runId, entry);
     }
   }
   for (const [runId, entry] of subagentRuns.entries()) {

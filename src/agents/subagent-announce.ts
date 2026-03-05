@@ -1,3 +1,7 @@
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { loadConfig } from "../config/config.js";
@@ -45,6 +49,15 @@ type SubagentAnnounceDeliveryResult = {
   error?: string;
 };
 
+const TELEGRAM_COMPLETION_FALLBACK_MAX_ESCAPED_CHARS = 3600;
+const TELEGRAM_COMPLETION_TRUNCATED_IDEMPOTENCY_SUFFIX = ":truncated";
+const TELEGRAM_COMPLETION_COMPACT_IDEMPOTENCY_SUFFIX = ":compact";
+const COMPLETION_PDF_IDEMPOTENCY_SUFFIX = ":pdf";
+const TELEGRAM_COMPLETION_TRUNCATED_NOTICE = "\n\n[Output truncated to fit Telegram limits.]";
+const COMPLETION_PDF_FILE_PREFIX = "subagent-completion-report";
+const PDF_WRAP_CHARS = 96;
+const PDF_LINES_PER_PAGE = 48;
+
 function buildCompletionDeliveryMessage(params: {
   findings: string;
   subagentName: string;
@@ -56,6 +69,202 @@ function buildCompletionDeliveryMessage(params: {
     return header;
   }
   return `${header}\n\n${findingsText}`;
+}
+
+function normalizePdfText(value: string): string {
+  const normalizedLineEndings = value.replace(/\r\n?/g, "\n");
+  let output = "";
+  for (let i = 0; i < normalizedLineEndings.length; i += 1) {
+    const ch = normalizedLineEndings[i];
+    const code = normalizedLineEndings.charCodeAt(i);
+    if (ch === "\t") {
+      output += "  ";
+      continue;
+    }
+    if (ch === "\n") {
+      output += "\n";
+      continue;
+    }
+    if (code >= 0x20 && code <= 0x7e) {
+      output += ch;
+      continue;
+    }
+    output += "?";
+  }
+  return output;
+}
+
+function wrapPdfLines(value: string, maxChars: number): string[] {
+  const lines: string[] = [];
+  const sourceLines = normalizePdfText(value).split("\n");
+  for (const sourceLine of sourceLines) {
+    let line = sourceLine.trimEnd();
+    if (!line.trim()) {
+      lines.push("");
+      continue;
+    }
+    while (line.length > maxChars) {
+      let breakAt = line.lastIndexOf(" ", maxChars);
+      if (breakAt <= 0) {
+        breakAt = maxChars;
+      }
+      lines.push(line.slice(0, breakAt).trimEnd());
+      line = line.slice(breakAt).trimStart();
+    }
+    lines.push(line);
+  }
+  return lines.length > 0 ? lines : ["(empty)"];
+}
+
+function escapePdfLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function buildPdfTextContent(lines: string[]): string {
+  const ops: string[] = ["BT", "/F1 11 Tf", "1 0 0 1 50 770 Tm", "14 TL"];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (i > 0) {
+      ops.push("T*");
+    }
+    ops.push(`(${escapePdfLiteral(lines[i] ?? "")}) Tj`);
+  }
+  ops.push("ET");
+  return ops.join("\n");
+}
+
+function buildSimpleTextPdfBuffer(value: string): Buffer {
+  const wrapped = wrapPdfLines(value, PDF_WRAP_CHARS);
+  const pageCount = Math.max(1, Math.ceil(wrapped.length / PDF_LINES_PER_PAGE));
+  const pageLineSets = Array.from({ length: pageCount }, (_, index) =>
+    wrapped.slice(index * PDF_LINES_PER_PAGE, (index + 1) * PDF_LINES_PER_PAGE),
+  );
+
+  const pageRefs: number[] = [];
+  const objects: Array<{ id: number; body: string }> = [
+    { id: 1, body: "<< /Type /Catalog /Pages 2 0 R >>" },
+    { id: 3, body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+  ];
+
+  for (let i = 0; i < pageLineSets.length; i += 1) {
+    const pageObjId = 4 + i * 2;
+    const contentObjId = pageObjId + 1;
+    const content = buildPdfTextContent(pageLineSets[i]);
+    objects.push({
+      id: contentObjId,
+      body: `<< /Length ${Buffer.byteLength(content, "latin1")} >>\nstream\n${content}\nendstream`,
+    });
+    objects.push({
+      id: pageObjId,
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentObjId} 0 R >>`,
+    });
+    pageRefs.push(pageObjId);
+  }
+
+  objects.push({
+    id: 2,
+    body: `<< /Type /Pages /Count ${pageRefs.length} /Kids [${pageRefs.map((id) => `${id} 0 R`).join(" ")}] >>`,
+  });
+  objects.sort((a, b) => a.id - b.id);
+
+  let pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+  const offsets: number[] = [];
+  for (const object of objects) {
+    offsets[object.id] = Buffer.byteLength(pdf, "latin1");
+    pdf += `${object.id} 0 obj\n${object.body}\nendobj\n`;
+  }
+
+  const maxId = Math.max(...objects.map((object) => object.id));
+  const xrefOffset = Buffer.byteLength(pdf, "latin1");
+  pdf += `xref\n0 ${maxId + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (let id = 1; id <= maxId; id += 1) {
+    const offset = offsets[id] ?? 0;
+    pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${maxId + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, "latin1");
+}
+
+async function writeCompletionPdfTempFile(message: string): Promise<string> {
+  const fileName = `${COMPLETION_PDF_FILE_PREFIX}-${Date.now()}-${crypto.randomUUID()}.pdf`;
+  const filePath = path.join(os.tmpdir(), fileName);
+  await fs.writeFile(filePath, buildSimpleTextPdfBuffer(message));
+  return filePath;
+}
+
+async function unlinkBestEffort(filePath?: string): Promise<void> {
+  if (!filePath) {
+    return;
+  }
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+function buildCompletionPdfCaption(message: string): string {
+  const header = message.split(/\r?\n/u, 1)[0]?.trim() || "✅ Subagent finished";
+  return `${header}\n\nFull output attached as PDF report.`;
+}
+
+function estimateTelegramEscapedLength(value: string): number {
+  let length = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (ch === "&") {
+      length += 5;
+    } else if (ch === "<" || ch === ">") {
+      length += 4;
+    } else {
+      length += 1;
+    }
+  }
+  return length;
+}
+
+function truncateByTelegramEscapedLimit(value: string, maxEscapedChars: number): string {
+  if (!value || maxEscapedChars <= 0) {
+    return "";
+  }
+  let escaped = 0;
+  let i = 0;
+  for (; i < value.length; i += 1) {
+    const ch = value[i];
+    const delta = ch === "&" ? 5 : ch === "<" || ch === ">" ? 4 : 1;
+    if (escaped + delta > maxEscapedChars) {
+      break;
+    }
+    escaped += delta;
+  }
+  return value.slice(0, i).trimEnd();
+}
+
+function buildTelegramTruncatedCompletionMessage(message: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return "✅ Subagent finished";
+  }
+  const suffixBudget = estimateTelegramEscapedLength(TELEGRAM_COMPLETION_TRUNCATED_NOTICE);
+  const headBudget = Math.max(0, TELEGRAM_COMPLETION_FALLBACK_MAX_ESCAPED_CHARS - suffixBudget);
+  const head = truncateByTelegramEscapedLimit(trimmed, headBudget);
+  if (!head) {
+    return "✅ Subagent finished\n\n[Output omitted to fit Telegram limits.]";
+  }
+  return `${head}${TELEGRAM_COMPLETION_TRUNCATED_NOTICE}`;
+}
+
+function buildTelegramCompactCompletionMessage(message: string): string {
+  const excerpt = truncateByTelegramEscapedLimit(message.trim(), 500);
+  const lines = ["✅ Subagent finished", "", "Telegram rejected full output as too long."];
+  if (excerpt) {
+    lines.push("", excerpt, "", '[Excerpt only. Reply "expand" to get a condensed summary.]');
+  }
+  return lines.join("\n");
+}
+
+function isTelegramMessageTooLongError(errorMessage: string): boolean {
+  return /message is too long|message_too_long|text is too long/i.test(errorMessage);
 }
 
 function summarizeDeliveryError(error: unknown): string {
@@ -468,19 +677,86 @@ async function sendSubagentAnnounceDirectly(params: {
         completionDirectOrigin?.threadId != null && completionDirectOrigin.threadId !== ""
           ? String(completionDirectOrigin.threadId)
           : undefined;
-      await callGateway({
-        method: "send",
-        params: {
-          channel: completionChannel,
-          to: completionTo,
-          accountId: completionDirectOrigin?.accountId,
-          threadId: completionThreadId,
-          sessionKey: canonicalRequesterSessionKey,
-          message: params.completionMessage,
-          idempotencyKey: params.directIdempotencyKey,
-        },
-        timeoutMs: 15_000,
-      });
+      const sendCompletionMessage = async (
+        message: string,
+        idempotencyKey: string,
+        mediaUrl?: string,
+      ) => {
+        await callGateway({
+          method: "send",
+          params: {
+            channel: completionChannel,
+            to: completionTo,
+            accountId: completionDirectOrigin?.accountId,
+            threadId: completionThreadId,
+            sessionKey: canonicalRequesterSessionKey,
+            message,
+            ...(mediaUrl ? { mediaUrl } : {}),
+            idempotencyKey,
+          },
+          timeoutMs: 15_000,
+        });
+      };
+      try {
+        await sendCompletionMessage(params.completionMessage, params.directIdempotencyKey);
+      } catch (directErr) {
+        const directError = summarizeDeliveryError(directErr);
+        if (!isTelegramMessageTooLongError(directError)) {
+          return {
+            delivered: false,
+            path: "direct",
+            error: directError,
+          };
+        }
+        let pdfFilePath: string | undefined;
+        try {
+          pdfFilePath = await writeCompletionPdfTempFile(params.completionMessage);
+          await sendCompletionMessage(
+            buildCompletionPdfCaption(params.completionMessage),
+            `${params.directIdempotencyKey}${COMPLETION_PDF_IDEMPOTENCY_SUFFIX}`,
+            pdfFilePath,
+          );
+        } catch (pdfErr) {
+          const pdfError = summarizeDeliveryError(pdfErr);
+          if (!isTelegramMessageTooLongError(pdfError)) {
+            return {
+              delivered: false,
+              path: "direct",
+              error: pdfError,
+            };
+          }
+          try {
+            await sendCompletionMessage(
+              buildTelegramTruncatedCompletionMessage(params.completionMessage),
+              `${params.directIdempotencyKey}${TELEGRAM_COMPLETION_TRUNCATED_IDEMPOTENCY_SUFFIX}`,
+            );
+          } catch (truncatedErr) {
+            const truncatedError = summarizeDeliveryError(truncatedErr);
+            const shouldRetryCompact = isTelegramMessageTooLongError(truncatedError);
+            if (!shouldRetryCompact) {
+              return {
+                delivered: false,
+                path: "direct",
+                error: truncatedError,
+              };
+            }
+            try {
+              await sendCompletionMessage(
+                buildTelegramCompactCompletionMessage(params.completionMessage),
+                `${params.directIdempotencyKey}${TELEGRAM_COMPLETION_COMPACT_IDEMPOTENCY_SUFFIX}`,
+              );
+            } catch (compactErr) {
+              return {
+                delivered: false,
+                path: "direct",
+                error: summarizeDeliveryError(compactErr),
+              };
+            }
+          }
+        } finally {
+          await unlinkBestEffort(pdfFilePath);
+        }
+      }
 
       return {
         delivered: true,

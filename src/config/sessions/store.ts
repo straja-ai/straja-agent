@@ -1,14 +1,6 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { acquireSessionWriteLock } from "../../agents/session-write-lock.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { parseByteSize } from "../../cli/parse-bytes.js";
 import { parseDurationMs } from "../../cli/parse-duration.js";
-import {
-  archiveSessionTranscripts,
-  cleanupArchivedSessionTranscripts,
-} from "../../gateway/session-utils.fs.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   deliveryContextFromSession,
@@ -17,7 +9,7 @@ import {
   normalizeSessionDeliveryFields,
   type DeliveryContext,
 } from "../../utils/delivery-context.js";
-import { getFileMtimeMs, isCacheEnabled, resolveCacheTtlMs } from "../cache-utils.js";
+import { isCacheEnabled, resolveCacheTtlMs } from "../cache-utils.js";
 import { loadConfig } from "../config.js";
 import type { SessionMaintenanceConfig, SessionMaintenanceMode } from "../types.base.js";
 import { deriveSessionMetaPatch } from "./metadata.js";
@@ -145,55 +137,50 @@ type LoadSessionStoreOptions = {
   skipCache?: boolean;
 };
 
+const SESSION_STORE_PATCH_KEY = Symbol.for("openclaw.sessionStorePatchCallback");
+
+type SessionStorePatchOps = {
+  loadSessionStore: (storePath: string) => Record<string, unknown>;
+  saveSessionStore: (storePath: string, store: Record<string, unknown>) => void;
+};
+
+function resolveVaultSessionStoreOps(): SessionStorePatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[SESSION_STORE_PATCH_KEY] as (() => SessionStorePatchOps) | undefined;
+  return factory?.();
+}
+
+function requireVaultSessionStoreOps(context: string): SessionStorePatchOps {
+  const ops = resolveVaultSessionStoreOps();
+  if (ops) {
+    return ops;
+  }
+  throw new Error(
+    `[vault] ${context}: session store patch is missing; refusing disk session-store fallback`,
+  );
+}
+
 export function loadSessionStore(
   storePath: string,
   opts: LoadSessionStoreOptions = {},
 ): Record<string, SessionEntry> {
+  const vaultOps = requireVaultSessionStoreOps("loadSessionStore");
+
   // Check cache first if enabled
   if (!opts.skipCache && isSessionStoreCacheEnabled()) {
     const cached = SESSION_STORE_CACHE.get(storePath);
     if (cached && isSessionStoreCacheValid(cached)) {
-      const currentMtimeMs = getFileMtimeMs(storePath);
-      if (currentMtimeMs === cached.mtimeMs) {
-        // Return a deep copy to prevent external mutations affecting cache
-        return structuredClone(cached.store);
-      }
-      invalidateSessionStoreCache(storePath);
+      return structuredClone(cached.store);
     }
   }
 
-  // Cache miss or disabled - load from disk.
-  // Retry up to 3 times when the file is empty or unparseable.  On Windows the
-  // temp-file + rename write is not fully atomic: a concurrent reader can briefly
-  // observe a 0-byte file (between truncate and write) or a stale/locked state.
-  // A short synchronous backoff (50 ms via `Atomics.wait`) is enough for the
-  // writer to finish.
   let store: Record<string, SessionEntry> = {};
-  let mtimeMs = getFileMtimeMs(storePath);
-  const maxReadAttempts = process.platform === "win32" ? 3 : 1;
-  const retryBuf = maxReadAttempts > 1 ? new Int32Array(new SharedArrayBuffer(4)) : undefined;
-  for (let attempt = 0; attempt < maxReadAttempts; attempt++) {
-    try {
-      const raw = fs.readFileSync(storePath, "utf-8");
-      if (raw.length === 0 && attempt < maxReadAttempts - 1) {
-        // File is empty — likely caught mid-write; retry after a brief pause.
-        Atomics.wait(retryBuf!, 0, 0, 50);
-        continue;
-      }
-      const parsed = JSON.parse(raw);
-      if (isSessionStoreRecord(parsed)) {
-        store = parsed;
-      }
-      mtimeMs = getFileMtimeMs(storePath) ?? mtimeMs;
-      break;
-    } catch {
-      // File missing, locked, or transiently corrupt — retry on Windows.
-      if (attempt < maxReadAttempts - 1) {
-        Atomics.wait(retryBuf!, 0, 0, 50);
-        continue;
-      }
-      // Final attempt failed; proceed with an empty store.
-    }
+
+  const loaded = vaultOps.loadSessionStore(storePath);
+  if (isSessionStoreRecord(loaded)) {
+    store = loaded;
+  } else {
+    throw new Error("vault session store payload is not an object");
   }
 
   // Best-effort migration: message provider → channel naming.
@@ -226,7 +213,7 @@ export function loadSessionStore(
       store: structuredClone(store), // Store a copy to prevent external mutations
       loadedAt: Date.now(),
       storePath,
-      mtimeMs,
+      mtimeMs: undefined,
     });
   }
 
@@ -418,72 +405,14 @@ export function capEntryCount(
   return toRemove.length;
 }
 
-async function getSessionFileSize(storePath: string): Promise<number | null> {
-  try {
-    const stat = await fs.promises.stat(storePath);
-    return stat.size;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Rotate the sessions file if it exceeds the configured size threshold.
- * Renames the current file to `sessions.json.bak.{timestamp}` and cleans up
- * old rotation backups, keeping only the 3 most recent `.bak.*` files.
- */
 export async function rotateSessionFile(
   storePath: string,
   overrideBytes?: number,
 ): Promise<boolean> {
-  const maxBytes = overrideBytes ?? resolveMaintenanceConfig().rotateBytes;
-
-  // Check current file size (file may not exist yet).
-  const fileSize = await getSessionFileSize(storePath);
-  if (fileSize == null) {
-    return false;
-  }
-
-  if (fileSize <= maxBytes) {
-    return false;
-  }
-
-  // Rotate: rename current file to .bak.{timestamp}
-  const backupPath = `${storePath}.bak.${Date.now()}`;
-  try {
-    await fs.promises.rename(storePath, backupPath);
-    log.info("rotated session store file", {
-      backupPath: path.basename(backupPath),
-      sizeBytes: fileSize,
-    });
-  } catch {
-    // If rename fails (e.g. file disappeared), skip rotation.
-    return false;
-  }
-
-  // Clean up old backups — keep only the 3 most recent .bak.* files.
-  try {
-    const dir = path.dirname(storePath);
-    const baseName = path.basename(storePath);
-    const files = await fs.promises.readdir(dir);
-    const backups = files
-      .filter((f) => f.startsWith(`${baseName}.bak.`))
-      .toSorted()
-      .toReversed();
-
-    const maxBackups = 3;
-    if (backups.length > maxBackups) {
-      const toDelete = backups.slice(maxBackups);
-      for (const old of toDelete) {
-        await fs.promises.unlink(path.join(dir, old)).catch(() => undefined);
-      }
-      log.info("cleaned up old session store backups", { deleted: toDelete.length });
-    }
-  } catch {
-    // Best-effort cleanup; don't fail the write.
-  }
-
-  return true;
+  void storePath;
+  void overrideBytes;
+  requireVaultSessionStoreOps("rotateSessionFile");
+  return false;
 }
 
 type SaveSessionStoreOptions = {
@@ -500,6 +429,8 @@ async function saveSessionStoreUnlocked(
   store: Record<string, SessionEntry>,
   opts?: SaveSessionStoreOptions,
 ): Promise<void> {
+  const vaultOps = requireVaultSessionStoreOps("saveSessionStore");
+
   // Invalidate cache on write to ensure consistency
   invalidateSessionStoreCache(storePath);
 
@@ -532,124 +463,14 @@ async function saveSessionStoreUnlocked(
       }
     } else {
       // Prune stale entries and cap total count before serializing.
-      const prunedSessionFiles = new Map<string, string | undefined>();
       pruneStaleEntries(store, maintenance.pruneAfterMs, {
-        onPruned: ({ entry }) => {
-          if (!prunedSessionFiles.has(entry.sessionId) || entry.sessionFile) {
-            prunedSessionFiles.set(entry.sessionId, entry.sessionFile);
-          }
-        },
+        onPruned: () => undefined,
       });
       capEntryCount(store, maintenance.maxEntries);
-      const archivedDirs = new Set<string>();
-      for (const [sessionId, sessionFile] of prunedSessionFiles) {
-        const archived = archiveSessionTranscripts({
-          sessionId,
-          storePath,
-          sessionFile,
-          reason: "deleted",
-        });
-        for (const archivedPath of archived) {
-          archivedDirs.add(path.dirname(archivedPath));
-        }
-      }
-      if (archivedDirs.size > 0) {
-        await cleanupArchivedSessionTranscripts({
-          directories: [...archivedDirs],
-          olderThanMs: maintenance.pruneAfterMs,
-          reason: "deleted",
-        });
-      }
-
-      // Rotate the on-disk file if it exceeds the size threshold.
-      await rotateSessionFile(storePath, maintenance.rotateBytes);
     }
   }
 
-  await fs.promises.mkdir(path.dirname(storePath), { recursive: true });
-  const json = JSON.stringify(store, null, 2);
-
-  // Windows: use temp-file + rename for atomic writes, same as other platforms.
-  // Direct `writeFile` truncates the target to 0 bytes before writing, which
-  // allows concurrent `readFileSync` calls (from unlocked `loadSessionStore`)
-  // to observe an empty file and lose the session store contents.
-  if (process.platform === "win32") {
-    const tmp = `${storePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      await fs.promises.writeFile(tmp, json, "utf-8");
-      // Retry rename up to 5 times with increasing backoff — rename can fail
-      // on Windows when the target is locked by a concurrent reader.  We do
-      // NOT fall back to writeFile or copyFile because both use CREATE_ALWAYS
-      // on Windows, which truncates the target to 0 bytes before writing —
-      // reintroducing the exact race this fix addresses.  If all attempts
-      // fail, the temp file is cleaned up and the next save cycle (which is
-      // serialized by the write lock) will succeed.
-      for (let i = 0; i < 5; i++) {
-        try {
-          await fs.promises.rename(tmp, storePath);
-          break;
-        } catch {
-          if (i < 4) {
-            await new Promise((r) => setTimeout(r, 50 * (i + 1)));
-          }
-          // Final attempt failed — skip this save.  The write lock ensures
-          // the next save will retry with fresh data.  Log for diagnostics.
-          if (i === 4) {
-            console.warn(`[session-store] rename failed after 5 attempts: ${storePath}`);
-          }
-        }
-      }
-    } catch (err) {
-      const code =
-        err && typeof err === "object" && "code" in err
-          ? String((err as { code?: unknown }).code)
-          : null;
-      if (code === "ENOENT") {
-        return;
-      }
-      throw err;
-    } finally {
-      await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
-    }
-    return;
-  }
-
-  const tmp = `${storePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.promises.writeFile(tmp, json, { mode: 0o600, encoding: "utf-8" });
-    await fs.promises.rename(tmp, storePath);
-    // Ensure permissions are set even if rename loses them
-    await fs.promises.chmod(storePath, 0o600);
-  } catch (err) {
-    const code =
-      err && typeof err === "object" && "code" in err
-        ? String((err as { code?: unknown }).code)
-        : null;
-
-    if (code === "ENOENT") {
-      // In tests the temp session-store directory may be deleted while writes are in-flight.
-      // Best-effort: try a direct write (recreating the parent dir), otherwise ignore.
-      try {
-        await fs.promises.mkdir(path.dirname(storePath), { recursive: true });
-        await fs.promises.writeFile(storePath, json, { mode: 0o600, encoding: "utf-8" });
-        await fs.promises.chmod(storePath, 0o600);
-      } catch (err2) {
-        const code2 =
-          err2 && typeof err2 === "object" && "code" in err2
-            ? String((err2 as { code?: unknown }).code)
-            : null;
-        if (code2 === "ENOENT") {
-          return;
-        }
-        throw err2;
-      }
-      return;
-    }
-
-    throw err;
-  } finally {
-    await fs.promises.rm(tmp, { force: true });
-  }
+  vaultOps.saveSessionStore(storePath, store as unknown as Record<string, unknown>);
 }
 
 export async function saveSessionStore(
@@ -730,22 +551,14 @@ async function drainSessionStoreLockQueue(storePath: string): Promise<void> {
         continue;
       }
 
-      let lock: { release: () => Promise<void> } | undefined;
       let result: unknown;
       let failed: unknown;
       let hasFailure = false;
       try {
-        lock = await acquireSessionWriteLock({
-          sessionFile: storePath,
-          timeoutMs: remainingTimeoutMs,
-          staleMs: task.staleMs,
-        });
         result = await task.fn();
       } catch (err) {
         hasFailure = true;
         failed = err;
-      } finally {
-        await lock?.release().catch(() => undefined);
       }
       if (hasFailure) {
         task.reject(failed);

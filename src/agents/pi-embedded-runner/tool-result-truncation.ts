@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { TextContent } from "@mariozechner/pi-ai";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import { log } from "./logger.js";
 
 /**
@@ -145,6 +146,7 @@ export async function truncateOversizedToolResultsInSession(params: {
   const maxChars = calculateMaxToolResultChars(contextWindowTokens);
 
   try {
+    ensureVaultSessionManagerPatched("truncateOversizedToolResultsInSession");
     const sessionManager = SessionManager.open(sessionFile);
     const branch = sessionManager.getBranch();
 

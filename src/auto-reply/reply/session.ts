@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -29,6 +28,7 @@ import { archiveSessionTranscripts } from "../../gateway/session-utils.fs.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
@@ -64,10 +64,11 @@ function forkSessionFromParent(params: {
     params.parentEntry,
     { agentId: params.agentId, sessionsDir: params.sessionsDir },
   );
-  if (!parentSessionFile || !fs.existsSync(parentSessionFile)) {
+  if (!parentSessionFile) {
     return null;
   }
   try {
+    ensureVaultSessionManagerPatched("forkSessionFromParent");
     const manager = SessionManager.open(parentSessionFile);
     const leafId = manager.getLeafId();
     if (leafId) {
@@ -77,20 +78,7 @@ function forkSessionFromParent(params: {
         return { sessionId, sessionFile };
       }
     }
-    const sessionId = crypto.randomUUID();
-    const timestamp = new Date().toISOString();
-    const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-    const sessionFile = path.join(manager.getSessionDir(), `${fileTimestamp}_${sessionId}.jsonl`);
-    const header = {
-      type: "session",
-      version: CURRENT_SESSION_VERSION,
-      id: sessionId,
-      timestamp,
-      cwd: manager.getCwd(),
-      parentSession: parentSessionFile,
-    };
-    fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf-8");
-    return { sessionId, sessionFile };
+    return null;
   } catch {
     return null;
   }

@@ -1,10 +1,31 @@
-import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import { resolveDefaultSessionStorePath, resolveSessionFilePath } from "./paths.js";
 import { loadSessionStore, updateSessionStore } from "./store.js";
 import type { SessionEntry } from "./types.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+const VAULT_SESSION_COLLECTION = "_sessions";
+const VAULT_TIMEOUT_MS = 5_000;
+
+function getVaultSessionBaseUrl(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const value = g[VAULT_READER_KEY];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function sessionFileToVaultKey(sessionFile: string): string {
+  return path.basename(sessionFile);
+}
 
 function stripQuery(value: string): string {
   const noHash = value.split("#")[0] ?? value;
@@ -61,21 +82,41 @@ async function ensureSessionHeader(params: {
   sessionFile: string;
   sessionId: string;
 }): Promise<void> {
-  if (fs.existsSync(params.sessionFile)) {
+  const vaultBaseUrl = getVaultSessionBaseUrl();
+  if (vaultBaseUrl) {
+    const key = sessionFileToVaultKey(params.sessionFile);
+    const url = `${vaultBaseUrl}/raw/${VAULT_SESSION_COLLECTION}/${encodeURIComponent(key)}`;
+    const existing = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (existing.status === 200) {
+      return;
+    }
+    if (existing.status !== 404) {
+      throw new Error(`vault session header read failed (${existing.status})`);
+    }
+    const header = {
+      type: "session",
+      version: CURRENT_SESSION_VERSION,
+      id: params.sessionId,
+      timestamp: new Date().toISOString(),
+      cwd: process.cwd(),
+    };
+    const writeResp = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: `${JSON.stringify(header)}\n`,
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!writeResp.ok) {
+      throw new Error(`vault session header write failed (${writeResp.status})`);
+    }
     return;
   }
-  await fs.promises.mkdir(path.dirname(params.sessionFile), { recursive: true });
-  const header = {
-    type: "session",
-    version: CURRENT_SESSION_VERSION,
-    id: params.sessionId,
-    timestamp: new Date().toISOString(),
-    cwd: process.cwd(),
-  };
-  await fs.promises.writeFile(params.sessionFile, `${JSON.stringify(header)}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  throw new Error(
+    "[vault] ensureSessionHeader: vault session base URL missing; refusing disk transcript fallback",
+  );
 }
 
 export async function appendAssistantMessageToSessionTranscript(params: {
@@ -121,6 +162,7 @@ export async function appendAssistantMessageToSessionTranscript(params: {
 
   await ensureSessionHeader({ sessionFile, sessionId: entry.sessionId });
 
+  ensureVaultSessionManagerPatched("appendAssistantMessageToSessionTranscript");
   const sessionManager = SessionManager.open(sessionFile);
   sessionManager.appendMessage({
     role: "assistant",

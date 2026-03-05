@@ -1,5 +1,3 @@
-import fs from "node:fs/promises";
-
 type SessionHeaderEntry = { type: "session"; id?: string; cwd?: string };
 type SessionMessageEntry = { type: "message"; message?: { role?: string } };
 
@@ -42,8 +40,7 @@ export async function prepareSessionManagerForRun(params: {
   }
 
   if (params.hadSessionFile && header && !hasAssistant) {
-    // Reset file so the first assistant flush includes header+user+assistant in order.
-    await fs.writeFile(params.sessionFile, "", "utf-8");
+    // Reset transcript state so the first assistant flush includes header+user+assistant in order.
     sm.fileEntries = [header];
     sm.byId?.clear?.();
     sm.labelsById?.clear?.();

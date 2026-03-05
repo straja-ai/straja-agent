@@ -26,8 +26,8 @@
  * - Disk writes are SUPPRESSED (origPersist / origRewriteFile are NOT called).
  * - Vault writes use synchronous curl to localhost so data is available
  *   before the gateway broadcasts events to the UI.
- * - Reads (setSessionFile) load exclusively from vault. If vault is empty
- *   or unreachable, a new empty session is started.
+ * - Reads (setSessionFile) load exclusively from vault. 404 means "new empty
+ *   session"; transport/non-404 failures throw (fail closed).
  *
  * The vault must be running on the configured baseUrl for this to work.
  */
@@ -43,6 +43,8 @@ export const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
 
 /** Well-known Symbol used to expose the vault base URL to the gateway reader. */
 export const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+/** Marker set on SessionManager.prototype when vault patch is active. */
+const SESSION_PATCH_APPLIED_KEY = Symbol.for("openclaw.sessionPatchApplied");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,9 +100,20 @@ function syncHttpGet(url: string): { status: number; body: string } {
  */
 function syncHttpWrite(method: string, url: string, body: string): void {
   try {
-    execFileSync(
+    const statusRaw = execFileSync(
       "curl",
-      ["-s", "-X", method, "-H", "Content-Type: text/plain", "--data-binary", "@-", url],
+      [
+        "-s",
+        "-w",
+        "\n%{http_code}",
+        "-X",
+        method,
+        "-H",
+        "Content-Type: text/plain",
+        "--data-binary",
+        "@-",
+        url,
+      ],
       {
         input: body,
         encoding: "utf-8",
@@ -109,8 +122,13 @@ function syncHttpWrite(method: string, url: string, body: string): void {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-  } catch (err) {
-    console.error(`[vault-session] ${method} ${url} failed: ${err}`);
+    const status = Number.parseInt(statusRaw.trim().split("\n").pop() || "0", 10);
+    if (!Number.isFinite(status) || status < 200 || status >= 300) {
+      throw new Error(`HTTP ${status}`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Vault HTTP ${method} ${url} failed: ${msg}`);
   }
 }
 
@@ -160,11 +178,14 @@ function applyPatch(
   const rawUrl = (key: string) => `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
 
   const SM = SessionManager.prototype;
+  if ((SM as Record<symbol, unknown>)[SESSION_PATCH_APPLIED_KEY] === true) {
+    return;
+  }
 
   // No original methods saved — disk I/O is fully suppressed.
 
   // -- Override _persist(entry) ---------------------------------------------
-  // Vault-only write (async, non-blocking).
+  // Vault-only write (synchronous, fail-closed).
   // Note: _persist is called by _appendEntry which already pushed entry to
   // fileEntries and updated byId/leafId. We only need to handle persistence.
   SM._persist = function (this: any, entry: any) {
@@ -194,7 +215,7 @@ function applyPatch(
   };
 
   // -- Override _rewriteFile() ----------------------------------------------
-  // Vault-only write (async, non-blocking). No disk write.
+  // Vault-only write (synchronous, fail-closed). No disk write.
   SM._rewriteFile = function (this: any) {
     if (!this.persist || !this.sessionFile) return;
     const key = sessionPathToVaultKey(this.sessionFile);
@@ -209,14 +230,12 @@ function applyPatch(
     const key = sessionPathToVaultKey(resolvedPath);
 
     // Read from vault (synchronous)
+    const resp = syncHttpGet(rawUrl(key));
     let vaultEntries: any[] = [];
-    try {
-      const resp = syncHttpGet(rawUrl(key));
-      if (resp.status === 200 && resp.body.trim()) {
-        vaultEntries = parseSessionEntries(resp.body);
-      }
-    } catch {
-      // Vault unreachable — start with empty session
+    if (resp.status === 200 && resp.body.trim()) {
+      vaultEntries = parseSessionEntries(resp.body);
+    } else if (resp.status !== 404) {
+      throw new Error(`Vault session read failed (${resp.status}) for key ${key}`);
     }
 
     this.sessionFile = resolvedPath;
@@ -231,7 +250,9 @@ function applyPatch(
 
     this._buildIndex();
     this.flushed = true;
-    this._vaultFlushed = vaultEntries.length > 0;
+    this._vaultFlushed = vaultEntries.some(
+      (e: any) => e.type === "message" && e.message?.role === "assistant",
+    );
   };
 
   // -- Override createBranchedSession(leafId) --------------------------------
@@ -246,4 +267,6 @@ function applyPatch(
     }
     return result;
   };
+
+  (SM as Record<symbol, unknown>)[SESSION_PATCH_APPLIED_KEY] = true;
 }

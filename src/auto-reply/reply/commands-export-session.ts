@@ -9,6 +9,7 @@ import {
 } from "../../config/sessions/paths.js";
 import { loadSessionStore } from "../../config/sessions/store.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
+import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
 import type { ReplyPayload } from "../types.js";
 import { resolveCommandsSystemPromptBundle } from "./commands-system-prompt.js";
 import type { HandleCommandsParams } from "./commands-types.js";
@@ -136,11 +137,8 @@ export async function buildExportSessionReply(params: HandleCommandsParams): Pro
     };
   }
 
-  if (!fs.existsSync(sessionFile)) {
-    return { text: `❌ Session file not found: ${sessionFile}` };
-  }
-
   // 2. Load session entries
+  ensureVaultSessionManagerPatched("buildExportSessionReply");
   const sessionManager = SessionManager.open(sessionFile);
   const entries = sessionManager.getEntries();
   const header = sessionManager.getHeader();

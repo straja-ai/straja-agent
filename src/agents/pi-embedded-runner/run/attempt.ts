@@ -3,13 +3,7 @@ import os from "node:os";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
-import {
-  createAgentSession,
-  migrateSessionEntries,
-  parseSessionEntries,
-  SessionManager,
-  SettingsManager,
-} from "@mariozechner/pi-coding-agent";
+import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
@@ -22,6 +16,7 @@ import {
   isSubagentSessionKey,
   normalizeAgentId,
 } from "../../../routing/session-key.js";
+import { ensureVaultSessionManagerPatched } from "../../../sessions/vault-session-manager.js";
 import { resolveSignalReactionLevel } from "../../../signal/reaction-level.js";
 import { resolveTelegramInlineButtonsScope } from "../../../telegram/inline-buttons.js";
 import { resolveTelegramReactionLevel } from "../../../telegram/reaction-level.js";
@@ -58,13 +53,8 @@ import { toClientToolDefinitions } from "../../pi-tool-definition-adapter.js";
 import { createOpenClawCodingTools, resolveToolLoopDetectionConfig } from "../../pi-tools.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
-import { repairSessionFileIfNeeded } from "../../session-file-repair.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
 import { sanitizeToolUseResultPairing } from "../../session-transcript-repair.js";
-import {
-  acquireSessionWriteLock,
-  resolveSessionLockMaxHoldFromTimeout,
-} from "../../session-write-lock.js";
 import { detectRuntimeShell } from "../../shell-utils.js";
 import {
   applySkillEnvOverrides,
@@ -75,6 +65,7 @@ import {
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveTranscriptPolicy } from "../../transcript-policy.js";
+import { assertVaultRuntimeReady } from "../../vault-runtime.js";
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
 import { isRunnerAbortError } from "../abort.js";
 import { appendCacheTtlTimestamp, isCacheTtlEligibleProvider } from "../cache-ttl.js";
@@ -95,7 +86,7 @@ import {
   setActiveEmbeddedRun,
 } from "../runs.js";
 import { buildEmbeddedSandboxInfo } from "../sandbox-info.js";
-import { prewarmSessionFile, trackSessionManagerAccess } from "../session-manager-cache.js";
+import { trackSessionManagerAccess } from "../session-manager-cache.js";
 import { prepareSessionManagerForRun } from "../session-manager-init.js";
 import {
   applySystemPromptOverrideToSession,
@@ -227,6 +218,7 @@ function summarizeSessionContext(messages: AgentMessage[]): {
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
+  await assertVaultRuntimeReady("runEmbeddedAttempt");
   const resolvedWorkspace = resolveUserPath(params.workspaceDir);
   const prevCwd = process.cwd();
   const runAbortController = new AbortController();
@@ -492,25 +484,13 @@ export async function runEmbeddedAttempt(
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
     const systemPromptText = systemPromptOverride();
 
-    const sessionLock = await acquireSessionWriteLock({
-      sessionFile: params.sessionFile,
-      maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
-        timeoutMs: params.timeoutMs,
-      }),
-    });
+    const sessionLock = { release: async () => undefined };
 
     let sessionManager: ReturnType<typeof guardSessionManager> | undefined;
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let removeToolResultContextGuard: (() => void) | undefined;
     try {
-      await repairSessionFileIfNeeded({
-        sessionFile: params.sessionFile,
-        warn: (message) => log.warn(message),
-      });
-      const hadSessionFile = await fs
-        .stat(params.sessionFile)
-        .then(() => true)
-        .catch(() => false);
+      const hadSessionFile = true;
 
       const transcriptPolicy = resolveTranscriptPolicy({
         modelApi: params.model?.api,
@@ -518,26 +498,12 @@ export async function runEmbeddedAttempt(
         modelId: params.modelId,
       });
 
-      await prewarmSessionFile(params.sessionFile);
-
-      // Invoke any session patch callback registered by plugins on globalThis.
-      // Plugins loaded by Jiti can't access the bundle's SessionManager directly
-      // (Jiti's import() proxy creates separate module instances), so we pass
-      // the real SessionManager, parseSessionEntries, and migrateSessionEntries
-      // to the callback here.
-      const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
-      const g = globalThis as Record<symbol, unknown>;
-      if (typeof g[SESSION_PATCH_KEY] === "function") {
-        g[SESSION_PATCH_KEY](SessionManager, parseSessionEntries, migrateSessionEntries);
-        delete g[SESSION_PATCH_KEY];
-        log.info("Applied session persistence patch from plugin");
-      }
-
       // Flush any async plugin setup promises.
       const pluginRegistry = getActivePluginRegistry();
       if (pluginRegistry) {
         await flushPluginSetup(pluginRegistry);
       }
+      ensureVaultSessionManagerPatched("runEmbeddedAttempt");
 
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,

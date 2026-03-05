@@ -1,9 +1,31 @@
 import os from "node:os";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
-import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 import type { SubagentRunRecord } from "./subagent-registry.js";
+
+const SUBAGENT_REGISTRY_PATCH_KEY = Symbol.for("openclaw.subagentRegistryPatchCallback");
+
+type SubagentRegistryPatchOps = {
+  loadSubagentRegistry: () => Record<string, unknown>;
+  saveSubagentRegistry: (runs: Record<string, unknown>) => void;
+};
+
+function resolveVaultSubagentRegistryOps(): SubagentRegistryPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[SUBAGENT_REGISTRY_PATCH_KEY] as (() => SubagentRegistryPatchOps) | undefined;
+  return factory?.();
+}
+
+function requireVaultSubagentRegistryOps(context: string): SubagentRegistryPatchOps {
+  const ops = resolveVaultSubagentRegistryOps();
+  if (ops) {
+    return ops;
+  }
+  throw new Error(
+    `[vault] ${context}: subagent registry patch is missing; refusing disk registry fallback`,
+  );
+}
 
 export type PersistedSubagentRegistryVersion = 1 | 2;
 
@@ -46,8 +68,8 @@ export function resolveSubagentRegistryPath(): string {
 }
 
 export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
-  const pathname = resolveSubagentRegistryPath();
-  const raw = loadJsonFile(pathname);
+  const vaultOps = requireVaultSubagentRegistryOps("loadSubagentRegistry");
+  const raw = vaultOps.loadSubagentRegistry();
   if (!raw || typeof raw !== "object") {
     return new Map();
   }
@@ -107,17 +129,13 @@ export function loadSubagentRegistryFromDisk(): Map<string, SubagentRunRecord> {
     }
   }
   if (migrated) {
-    try {
-      saveSubagentRegistryToDisk(out);
-    } catch {
-      // ignore migration write failures
-    }
+    saveSubagentRegistryToDisk(out);
   }
   return out;
 }
 
 export function saveSubagentRegistryToDisk(runs: Map<string, SubagentRunRecord>) {
-  const pathname = resolveSubagentRegistryPath();
+  const vaultOps = requireVaultSubagentRegistryOps("saveSubagentRegistry");
   const serialized: Record<string, PersistedSubagentRunRecord> = {};
   for (const [runId, entry] of runs.entries()) {
     serialized[runId] = entry;
@@ -126,5 +144,5 @@ export function saveSubagentRegistryToDisk(runs: Map<string, SubagentRunRecord>)
     version: REGISTRY_VERSION,
     runs: serialized,
   };
-  saveJsonFile(pathname, out);
+  vaultOps.saveSubagentRegistry(out as unknown as Record<string, unknown>);
 }

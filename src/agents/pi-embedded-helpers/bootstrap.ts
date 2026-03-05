@@ -1,10 +1,30 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { OpenClawConfig } from "../../config/config.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import type { WorkspaceBootstrapFile } from "../workspace.js";
 import type { EmbeddedContextFile } from "./types.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+const VAULT_SESSION_COLLECTION = "_sessions";
+const VAULT_TIMEOUT_MS = 5_000;
+
+function getVaultSessionBaseUrl(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const value = g[VAULT_READER_KEY];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function sessionFileToVaultKey(sessionFile: string): string {
+  return path.basename(sessionFile);
+}
 
 type ContentBlockWithSignature = {
   thought_signature?: unknown;
@@ -165,23 +185,42 @@ export async function ensureSessionHeader(params: {
   sessionId: string;
   cwd: string;
 }) {
-  const file = params.sessionFile;
-  try {
-    await fs.stat(file);
+  const vaultBaseUrl = getVaultSessionBaseUrl();
+  if (vaultBaseUrl) {
+    const key = sessionFileToVaultKey(params.sessionFile);
+    const url = `${vaultBaseUrl}/raw/${VAULT_SESSION_COLLECTION}/${encodeURIComponent(key)}`;
+    const existing = await fetch(url, {
+      method: "GET",
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (existing.status === 200) {
+      return;
+    }
+    if (existing.status !== 404) {
+      throw new Error(`vault session header read failed (${existing.status})`);
+    }
+    const sessionVersion = 2;
+    const entry = {
+      type: "session",
+      version: sessionVersion,
+      id: params.sessionId,
+      timestamp: new Date().toISOString(),
+      cwd: params.cwd,
+    };
+    const writeResp = await fetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: `${JSON.stringify(entry)}\n`,
+      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+    });
+    if (!writeResp.ok) {
+      throw new Error(`vault session header write failed (${writeResp.status})`);
+    }
     return;
-  } catch {
-    // create
   }
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const sessionVersion = 2;
-  const entry = {
-    type: "session",
-    version: sessionVersion,
-    id: params.sessionId,
-    timestamp: new Date().toISOString(),
-    cwd: params.cwd,
-  };
-  await fs.writeFile(file, `${JSON.stringify(entry)}\n`, "utf-8");
+  throw new Error(
+    "[vault] ensureSessionHeader: vault session base URL missing; refusing disk transcript fallback",
+  );
 }
 
 export function buildBootstrapContextFiles(

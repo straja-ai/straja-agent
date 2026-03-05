@@ -9,8 +9,10 @@
 export const DEFAULT_GATEWAY_HTTP_TOOL_DENY = [
   // Session orchestration — spawning agents remotely is RCE
   "sessions_spawn",
+  "vault_sessions_spawn",
   // Cross-session injection — message injection across sessions
   "sessions_send",
+  "vault_sessions_send",
   // Gateway control plane — prevents gateway reconfiguration via HTTP
   "gateway",
   // Interactive setup — requires terminal QR scan, hangs on HTTP
@@ -26,7 +28,9 @@ export const DANGEROUS_ACP_TOOL_NAMES = [
   "spawn",
   "shell",
   "sessions_spawn",
+  "vault_sessions_spawn",
   "sessions_send",
+  "vault_sessions_send",
   "gateway",
   "fs_write",
   "fs_delete",

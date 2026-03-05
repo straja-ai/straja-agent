@@ -1,12 +1,54 @@
+import { execFileSync } from "node:child_process";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { registerBootstrapPatch } from "./src/bootstrap-patch.js";
 import { registerCronStorePatch } from "./src/cron-store-patch.js";
 import { registerFsToolsPatch } from "./src/fs-tools-patch.js";
 import { registerGatewayWorkspacePatch } from "./src/gateway-workspace-patch.js";
 import { registerSessionPatch } from "./src/session-patch.js";
+import { registerSessionStorePatch } from "./src/session-store-patch.js";
+import { registerSubagentRegistryPatch } from "./src/subagent-registry-patch.js";
 import { createVaultTools } from "./src/tools.js";
 
 const DEFAULT_BASE_URL = "http://localhost:8181";
+
+function normalizeVaultBaseUrl(raw: string | undefined): string {
+  const candidate = (raw ?? "").trim() || DEFAULT_BASE_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error(`Invalid vault base URL: ${candidate}`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Vault base URL must use http/https: ${candidate}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Vault base URL must not include credentials");
+  }
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function assertVaultReachable(baseUrl: string): void {
+  if (process.env.VITEST || process.env.NODE_ENV === "test") {
+    return;
+  }
+  const probeUrl = `${baseUrl}/raw/_workspace/${encodeURIComponent("__vault_required_probe__")}`;
+  try {
+    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", probeUrl], {
+      encoding: "utf-8",
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const statusRaw = result.trimEnd().split("\n").pop() || "0";
+    const status = Number.parseInt(statusRaw, 10);
+    if (!Number.isFinite(status) || status <= 0 || status >= 500) {
+      throw new Error(`HTTP ${status}`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Vault is required but unreachable at ${baseUrl}: ${msg}`);
+  }
+}
 
 // Prevent double-patching across hot-reloads
 let sessionPatched = false;
@@ -14,6 +56,8 @@ let fsToolsPatched = false;
 let bootstrapPatched = false;
 let gatewayWorkspacePatched = false;
 let cronStorePatched = false;
+let sessionStorePatched = false;
+let subagentRegistryPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
 
@@ -139,8 +183,10 @@ const plugin = {
   },
 
   register(api: OpenClawPluginApi) {
-    const baseUrl =
-      (api.pluginConfig?.baseUrl as string) || process.env.STRAJA_VAULT_URL || DEFAULT_BASE_URL;
+    const baseUrl = normalizeVaultBaseUrl(
+      ((api.pluginConfig?.baseUrl as string) || process.env.STRAJA_VAULT_URL) ?? undefined,
+    );
+    assertVaultReachable(baseUrl);
 
     // Register tools synchronously so they are available immediately.
     const tools = createVaultTools(baseUrl, {
@@ -203,6 +249,20 @@ const plugin = {
       registerCronStorePatch(baseUrl);
       cronStorePatched = true;
       api.logger.info("Cron store patch registered (jobs + run logs → vault _cron collection)");
+    }
+
+    // Register session-store patch — routes sessions.json load/save through vault.
+    if (!sessionStorePatched) {
+      registerSessionStorePatch(baseUrl);
+      sessionStorePatched = true;
+      api.logger.info("Session store patch registered (sessions.json → vault _sessions_store)");
+    }
+
+    // Register subagent registry patch — routes subagents/runs.json through vault.
+    if (!subagentRegistryPatched) {
+      registerSubagentRegistryPatch(baseUrl);
+      subagentRegistryPatched = true;
+      api.logger.info("Subagent registry patch registered (runs.json → vault _subagents)");
     }
 
     // Register vault-backed session memory hook.

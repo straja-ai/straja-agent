@@ -10,6 +10,13 @@ type ToolProfilePolicy = {
 const TOOL_NAME_ALIASES: Record<string, string> = {
   bash: "exec",
   "apply-patch": "apply_patch",
+  vault_agents_list: "agents_list",
+  vault_sessions_list: "sessions_list",
+  vault_sessions_history: "sessions_history",
+  vault_sessions_send: "sessions_send",
+  vault_sessions_spawn: "sessions_spawn",
+  vault_subagents: "subagents",
+  vault_session_status: "session_status",
 };
 
 export const TOOL_GROUPS: Record<string, string[]> = {
