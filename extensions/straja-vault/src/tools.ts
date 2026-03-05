@@ -433,6 +433,38 @@ export const BrowserWaitSchema = Type.Object({
   timeout: Type.Optional(Type.Number({ description: "Timeout in milliseconds (default: 30000)." })),
 });
 
+export const BrowserTabsSchema = Type.Object({
+  action: Type.Union(
+    [Type.Literal("list"), Type.Literal("new"), Type.Literal("close"), Type.Literal("select")],
+    { description: "Tabs action to perform." },
+  ),
+  index: Type.Optional(
+    Type.Number({ description: "Tab index for close/select actions (0-based)." }),
+  ),
+});
+
+export const BrowserPdfSchema = Type.Object({
+  filename: Type.Optional(Type.String({ description: "Optional filename for the generated PDF." })),
+});
+
+export const BrowserDialogSchema = Type.Object({
+  accept: Type.Boolean({ description: "Accept (true) or dismiss (false) the dialog." }),
+  promptText: Type.Optional(
+    Type.String({ description: "Prompt text when handling a prompt dialog." }),
+  ),
+});
+
+export const BrowserUploadSchema = Type.Object({
+  collection: Type.String({
+    description: "Vault collection containing the file to upload (typically 'uploads').",
+  }),
+  path: Type.String({ description: "Path to the file inside the collection." }),
+});
+
+export const BrowserStatusSchema = Type.Object({});
+export const BrowserStartSchema = Type.Object({});
+export const BrowserStopSchema = Type.Object({});
+
 export const VaultExecSchema = Type.Object({
   command: Type.String({
     description:
@@ -2189,6 +2221,54 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     }
   }
 
+  async function callBrowserConnection(
+    path: string,
+    method: "GET" | "POST",
+    body: Record<string, unknown> | null,
+    signal?: AbortSignal,
+  ): Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }> {
+    try {
+      const resp = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        signal,
+      });
+      const raw = await resp.text();
+      let parsed: unknown = raw;
+      try {
+        parsed = raw ? JSON.parse(raw) : {};
+      } catch {
+        // leave as raw text
+      }
+      if (!resp.ok) {
+        const errorText =
+          parsed && typeof parsed === "object" && "error" in (parsed as Record<string, unknown>)
+            ? String((parsed as Record<string, unknown>).error)
+            : String(raw || `HTTP ${resp.status}`);
+        return {
+          content: [
+            { type: "text" as const, text: `Browser error (${resp.status}): ${errorText}` },
+          ],
+          details: parsed,
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2),
+          },
+        ],
+        details: parsed,
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Browser connection error: ${String(err)}` }],
+      };
+    }
+  }
+
   const vaultBrowserNavigate: AnyAgentTool = {
     name: "vault_browser_navigate",
     label: "Browser Navigate",
@@ -2312,6 +2392,78 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  const vaultBrowserTabs: AnyAgentTool = {
+    name: "vault_browser_tabs",
+    label: "Browser Tabs",
+    description: `Manage tabs (list, new, close, select). ${browserUsageNote}`,
+    parameters: BrowserTabsSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_tabs", params, signal);
+    },
+  };
+
+  const vaultBrowserPdf: AnyAgentTool = {
+    name: "vault_browser_pdf",
+    label: "Browser Save PDF",
+    description: `Save the current page as a PDF. ${browserUsageNote}`,
+    parameters: BrowserPdfSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_pdf_save", params, signal);
+    },
+  };
+
+  const vaultBrowserDialog: AnyAgentTool = {
+    name: "vault_browser_dialog",
+    label: "Browser Dialog",
+    description: `Accept or dismiss an active browser dialog. ${browserUsageNote}`,
+    parameters: BrowserDialogSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserTool("browser_handle_dialog", params, signal);
+    },
+  };
+
+  const vaultBrowserUpload: AnyAgentTool = {
+    name: "vault_browser_upload",
+    label: "Browser Upload",
+    description:
+      "Upload a file from the vault to an active browser file chooser. " +
+      "Uses vault collections only (no host filesystem paths).",
+    parameters: BrowserUploadSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserConnection("/connections/browser/upload", "POST", params, signal);
+    },
+  };
+
+  const vaultBrowserStatus: AnyAgentTool = {
+    name: "vault_browser_status",
+    label: "Browser Status",
+    description: "Get browser service status (running/stopped/configuration summary).",
+    parameters: BrowserStatusSchema,
+    async execute(_id: string, _params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserConnection("/connections/browser/status", "GET", null, signal);
+    },
+  };
+
+  const vaultBrowserStart: AnyAgentTool = {
+    name: "vault_browser_start",
+    label: "Browser Start",
+    description: "Start the vault browser service using saved browser config.",
+    parameters: BrowserStartSchema,
+    async execute(_id: string, _params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserConnection("/connections/browser/start", "POST", {}, signal);
+    },
+  };
+
+  const vaultBrowserStop: AnyAgentTool = {
+    name: "vault_browser_stop",
+    label: "Browser Stop",
+    description: "Stop the vault browser service.",
+    parameters: BrowserStopSchema,
+    async execute(_id: string, _params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserConnection("/connections/browser/stop", "POST", {}, signal);
+    },
+  };
+
   const vaultBrowserConsole: AnyAgentTool = {
     name: "vault_browser_console",
     label: "Browser Console",
@@ -2364,6 +2516,13 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultBrowserTabList,
     vaultBrowserTabNew,
     vaultBrowserTabClose,
+    vaultBrowserTabs,
+    vaultBrowserPdf,
+    vaultBrowserDialog,
+    vaultBrowserUpload,
+    vaultBrowserStatus,
+    vaultBrowserStart,
+    vaultBrowserStop,
     vaultBrowserConsole,
     vaultBrowserWait,
   ];
