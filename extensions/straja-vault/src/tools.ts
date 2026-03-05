@@ -174,6 +174,24 @@ export const VaultWebSearchDuckDuckGoSchema = Type.Object({
   ),
 });
 
+export const VaultWebFetchSchema = Type.Object({
+  url: Type.String({
+    description: "HTTP or HTTPS URL to fetch.",
+  }),
+  extractMode: Type.Optional(
+    Type.Union([Type.Literal("markdown"), Type.Literal("text")], {
+      description: 'Extraction mode ("markdown" or "text"). Default: "markdown".',
+      default: "markdown",
+    }),
+  ),
+  maxChars: Type.Optional(
+    Type.Number({
+      description: "Maximum characters to return (truncates when exceeded). Default: 50000.",
+      minimum: 100,
+    }),
+  ),
+});
+
 // ---------------------------------------------------------------------------
 // Gmail Draft Schema
 // ---------------------------------------------------------------------------
@@ -2184,6 +2202,93 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   };
 
   // ---------------------------------------------------------------------------
+  // Web Fetch — proxy to vault's web-fetch endpoint
+  // ---------------------------------------------------------------------------
+
+  const vaultWebFetch: AnyAgentTool = {
+    name: "vault_web_fetch",
+    label: "Web Fetch",
+    description:
+      "Fetch and extract readable content from a URL (HTML → markdown/text) through the vault. " +
+      "Use for lightweight page access without browser automation. " +
+      "Prefer this over browser tools for reading articles, documentation, API responses, and public web pages. " +
+      "Falls back to simple HTML extraction when full article parsing is unavailable.",
+    parameters: VaultWebFetchSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const url = String(params.url || "");
+      if (!url.trim()) {
+        return { content: [{ type: "text" as const, text: "Error: url is required." }] };
+      }
+
+      try {
+        const resp = await fetch(`${baseUrl}/connections/web-fetch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url,
+            extractMode: typeof params.extractMode === "string" ? params.extractMode : undefined,
+            maxChars: typeof params.maxChars === "number" ? params.maxChars : undefined,
+          }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          let errorMsg: string;
+          try {
+            const errData = JSON.parse(errText);
+            errorMsg = errData.error || errText;
+          } catch {
+            errorMsg = errText;
+          }
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Web fetch error (${resp.status}): ${errorMsg}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          url: string;
+          finalUrl: string;
+          status: number;
+          contentType: string;
+          title?: string;
+          extractMode: string;
+          extractor: string;
+          truncated: boolean;
+          length: number;
+          fetchedAt: string;
+          tookMs: number;
+          text: string;
+          cached?: boolean;
+        };
+
+        const header = data.title
+          ? `# ${data.title}\n\nSource: ${data.finalUrl}\n\n`
+          : `Source: ${data.finalUrl}\n\n`;
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${header}${data.text}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // ---------------------------------------------------------------------------
   // Browser tools — proxy to vault's playwright-mcp browser service
   // ---------------------------------------------------------------------------
 
@@ -2499,6 +2604,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultReportBuild,
     vaultArtifactUrl,
     vaultWebSearchDuckDuckGo,
+    vaultWebFetch,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
     vaultCalendarCreateEvent,

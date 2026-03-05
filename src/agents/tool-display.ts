@@ -78,7 +78,7 @@ export function resolveToolDisplay(params: {
   const fallbackVerb =
     key === "web_search"
       ? "search"
-      : key === "web_fetch"
+      : key === "web_fetch" || key === "vault_web_fetch"
         ? "fetch"
         : key.replace(/_/g, " ").replace(/\./g, " ");
   const verb = normalizeVerb(actionSpec?.label ?? action ?? fallbackVerb);
@@ -98,7 +98,7 @@ export function resolveToolDisplay(params: {
     detail = resolveWebSearchDetail(params.args);
   }
 
-  if (!detail && key === "web_fetch") {
+  if (!detail && (key === "web_fetch" || key === "vault_web_fetch")) {
     detail = resolveWebFetchDetail(params.args);
   }
 

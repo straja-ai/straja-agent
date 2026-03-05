@@ -276,7 +276,8 @@ function buildWebResearchSection(params: {
 
   const hasVaultDuckDuckGo = params.availableTools.has("vault_web_search_duckduckgo");
   const hasWebSearch = params.availableTools.has("web_search");
-  const hasWebFetch = params.availableTools.has("web_fetch");
+  const hasWebFetch =
+    params.availableTools.has("web_fetch") || params.availableTools.has("vault_web_fetch");
   const hasBrowser =
     params.availableTools.has("browser") ||
     Array.from(params.availableTools).some((tool) => tool.startsWith("vault_browser_"));
@@ -300,8 +301,11 @@ function buildWebResearchSection(params: {
   }
 
   if (hasWebFetch) {
+    const webFetchToolName = params.availableTools.has("vault_web_fetch")
+      ? params.resolveToolName("vault_web_fetch")
+      : params.resolveToolName("web_fetch");
     lines.push(
-      `Use ${params.resolveToolName("web_fetch")} after search when you need to inspect one or two specific result pages in more detail.`,
+      `Use ${webFetchToolName} after search when you need to inspect one or two specific result pages in more detail.`,
     );
   }
 
@@ -389,6 +393,8 @@ export function buildAgentSystemPrompt(params: {
     process: "Manage background exec sessions",
     web_search: "Search the web (Brave API)",
     web_fetch: "Fetch and extract readable content from a URL",
+    vault_web_fetch:
+      "Fetch and extract readable content from a URL via the vault (preferred over browser for reading pages)",
     vault_web_search_duckduckgo:
       "Search the web via the vault's DuckDuckGo adapter (preferred for simple factual lookups)",
     // Channel docking: add login tools here when a channel needs interactive linking.

@@ -304,6 +304,11 @@
       "title": "Web Fetch",
       "detailKeys": ["url", "extractMode", "maxChars"]
     },
+    "vault_web_fetch": {
+      "emoji": "📄",
+      "title": "Web Fetch",
+      "detailKeys": ["url", "extractMode", "maxChars"]
+    },
     "whatsapp_login": {
       "emoji": "🟢",
       "title": "WhatsApp Login",
