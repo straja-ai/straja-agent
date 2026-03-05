@@ -114,6 +114,7 @@ export function createVaultReadOperations(
 export interface VaultWriteOperations {
   writeFile: (absolutePath: string, content: string) => Promise<void>;
   mkdir: (dir: string) => Promise<void>;
+  deleteFile: (absolutePath: string) => Promise<void>;
 }
 
 export function createVaultWriteOperations(
@@ -138,6 +139,17 @@ export function createVaultWriteOperations(
 
     async mkdir(_dir: string): Promise<void> {
       // No-op: vault uses flat path keys, no directory structure needed
+    },
+
+    async deleteFile(absolutePath: string): Promise<void> {
+      const key = toVaultKey(absolutePath, workspaceRoot);
+      const resp = await fetch(rawUrl(baseUrl, key), { method: "DELETE" });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`ENOENT: no such file or directory, unlink '${absolutePath}'`);
+      }
+      // Consume body
+      await resp.text();
     },
   };
 }

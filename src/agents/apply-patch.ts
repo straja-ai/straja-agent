@@ -63,9 +63,23 @@ type SandboxApplyPatchConfig = {
   bridge: SandboxFsBridge;
 };
 
+/**
+ * Vault-backed file operations for apply_patch.
+ * When provided, all file I/O goes through the vault HTTP API — no disk fallback.
+ * Matches the PatchFileOps shape so it can be used as a drop-in replacement.
+ */
+export type VaultPatchOps = {
+  readFile: (filePath: string) => Promise<string>;
+  writeFile: (filePath: string, content: string) => Promise<void>;
+  remove: (filePath: string) => Promise<void>;
+  mkdirp: (dir: string) => Promise<void>;
+};
+
 type ApplyPatchOptions = {
   cwd: string;
   sandbox?: SandboxApplyPatchConfig;
+  /** Vault-backed file ops. Takes priority over sandbox and fs/promises. */
+  vaultOps?: VaultPatchOps;
   /** Restrict patch paths to the workspace root (cwd). Default: true. Set false to opt out. */
   workspaceOnly?: boolean;
   signal?: AbortSignal;
@@ -78,10 +92,16 @@ const applyPatchSchema = Type.Object({
 });
 
 export function createApplyPatchTool(
-  options: { cwd?: string; sandbox?: SandboxApplyPatchConfig; workspaceOnly?: boolean } = {},
+  options: {
+    cwd?: string;
+    sandbox?: SandboxApplyPatchConfig;
+    vaultOps?: VaultPatchOps;
+    workspaceOnly?: boolean;
+  } = {},
 ): AgentTool<typeof applyPatchSchema, ApplyPatchToolDetails> {
   const cwd = options.cwd ?? process.cwd();
   const sandbox = options.sandbox;
+  const vaultOps = options.vaultOps;
   const workspaceOnly = options.workspaceOnly !== false;
 
   return {
@@ -105,6 +125,7 @@ export function createApplyPatchTool(
       const result = await applyPatch(input, {
         cwd,
         sandbox,
+        vaultOps,
         workspaceOnly,
         signal,
       });
@@ -222,6 +243,10 @@ type PatchFileOps = {
 };
 
 function resolvePatchFileOps(options: ApplyPatchOptions): PatchFileOps {
+  // Vault ops take priority — no disk fallback when vault is the I/O layer.
+  if (options.vaultOps) {
+    return options.vaultOps;
+  }
   if (options.sandbox) {
     const { root, bridge } = options.sandbox;
     return {

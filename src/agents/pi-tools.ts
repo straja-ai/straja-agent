@@ -323,6 +323,7 @@ export function createOpenClawCodingTools(options?: {
     writeOperations: {
       writeFile: (p: string, c: string) => Promise<void>;
       mkdir: (d: string) => Promise<void>;
+      deleteFile: (p: string) => Promise<void>;
     };
     editOperations: {
       readFile: (p: string) => Promise<Buffer>;
@@ -398,6 +399,42 @@ export function createOpenClawCodingTools(options?: {
     readFile: lazyReadOperations.readFile,
     writeFile: lazyWriteOperations.writeFile,
     access: lazyReadOperations.access,
+  };
+
+  // Lazy patch operations for apply_patch: vault-backed read/write/delete/mkdir.
+  // Same security model as lazy read/write — no disk fallback.
+  const lazyPatchOps: import("./apply-patch.js").VaultPatchOps = {
+    readFile: async (absolutePath: string): Promise<string> => {
+      const v = resolveVaultOps();
+      if (v) {
+        const buf = await v.readOperations.readFile(absolutePath);
+        return buf.toString("utf8");
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk read of '${absolutePath}'`,
+      );
+    },
+    writeFile: async (absolutePath: string, content: string): Promise<void> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.writeOperations.writeFile(absolutePath, content);
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk write to '${absolutePath}'`,
+      );
+    },
+    remove: async (absolutePath: string): Promise<void> => {
+      const v = resolveVaultOps();
+      if (v) {
+        return v.writeOperations.deleteFile(absolutePath);
+      }
+      throw new Error(
+        `[vault-fs] Vault FS patch not available — refusing disk delete of '${absolutePath}'`,
+      );
+    },
+    mkdirp: async (_dir: string): Promise<void> => {
+      // No-op: vault uses flat path keys, no directory structure needed
+    },
   };
 
   const base = (codingTools as unknown as AnyAgentTool[]).flatMap((tool) => {
@@ -499,6 +536,7 @@ export function createOpenClawCodingTools(options?: {
             sandboxRoot && allowWorkspaceWrites
               ? { root: sandboxRoot, bridge: sandboxFsBridge! }
               : undefined,
+          vaultOps: lazyPatchOps,
           workspaceOnly: applyPatchWorkspaceOnly,
         });
   const tools: AnyAgentTool[] = [
@@ -593,6 +631,7 @@ export function createOpenClawCodingTools(options?: {
     read: "vault_read",
     write: "vault_write",
     edit: "vault_edit",
+    apply_patch: "vault_apply_patch",
     agents_list: "vault_agents_list",
     sessions_list: "vault_sessions_list",
     sessions_history: "vault_sessions_history",
