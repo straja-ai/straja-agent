@@ -28,32 +28,35 @@ const defaultImportPiSdk = () => import("./pi-model-discovery.js");
 let importPiSdk = defaultImportPiSdk;
 
 const CODEX_PROVIDER = "openai-codex";
-const OPENAI_CODEX_GPT53_MODEL_ID = "gpt-5.3-codex";
-const OPENAI_CODEX_GPT53_SPARK_MODEL_ID = "gpt-5.3-codex-spark";
+
+/** Base model → spark variant pairs for automatic spark fallback generation. */
+const OPENAI_CODEX_SPARK_PAIRS: ReadonlyArray<{ base: string; spark: string }> = [
+  { base: "gpt-5.3-codex", spark: "gpt-5.3-codex-spark" },
+  { base: "gpt-5.4", spark: "gpt-5.4-spark" },
+];
 
 function applyOpenAICodexSparkFallback(models: ModelCatalogEntry[]): void {
-  const hasSpark = models.some(
-    (entry) =>
-      entry.provider === CODEX_PROVIDER &&
-      entry.id.toLowerCase() === OPENAI_CODEX_GPT53_SPARK_MODEL_ID,
-  );
-  if (hasSpark) {
-    return;
-  }
+  for (const { base, spark } of OPENAI_CODEX_SPARK_PAIRS) {
+    const hasSpark = models.some(
+      (entry) => entry.provider === CODEX_PROVIDER && entry.id.toLowerCase() === spark,
+    );
+    if (hasSpark) {
+      continue;
+    }
 
-  const baseModel = models.find(
-    (entry) =>
-      entry.provider === CODEX_PROVIDER && entry.id.toLowerCase() === OPENAI_CODEX_GPT53_MODEL_ID,
-  );
-  if (!baseModel) {
-    return;
-  }
+    const baseModel = models.find(
+      (entry) => entry.provider === CODEX_PROVIDER && entry.id.toLowerCase() === base,
+    );
+    if (!baseModel) {
+      continue;
+    }
 
-  models.push({
-    ...baseModel,
-    id: OPENAI_CODEX_GPT53_SPARK_MODEL_ID,
-    name: OPENAI_CODEX_GPT53_SPARK_MODEL_ID,
-  });
+    models.push({
+      ...baseModel,
+      id: spark,
+      name: spark,
+    });
+  }
 }
 
 export function resetModelCatalogCacheForTest() {
