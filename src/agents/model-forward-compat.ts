@@ -4,7 +4,7 @@ import { normalizeModelCompat } from "./model-compat.js";
 import { normalizeProviderId } from "./model-selection.js";
 import type { ModelRegistry } from "./pi-model-discovery.js";
 
-const OPENAI_CODEX_FORWARD_COMPAT_IDS: readonly string[] = new Set(["gpt-5.3-codex", "gpt-5.4"]);
+const OPENAI_CODEX_FORWARD_COMPAT_IDS = new Set(["gpt-5.3-codex", "gpt-5.4"]);
 const OPENAI_CODEX_TEMPLATE_MODEL_IDS = ["gpt-5.2-codex"] as const;
 
 const ANTHROPIC_OPUS_46_MODEL_ID = "claude-opus-4-6";

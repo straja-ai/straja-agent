@@ -8,6 +8,31 @@ import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
 import { log } from "../logger.js";
 
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+
+/**
+ * Returns the vault media URL prefix (e.g. "http://127.0.0.1:8181/media/") if vault is configured.
+ */
+function getVaultMediaPrefix(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const raw = g[VAULT_READER_KEY];
+  if (typeof raw === "string" && raw.trim()) {
+    return `${raw.trim().replace(/\/+$/, "")}/media/`;
+  }
+  return null;
+}
+
+/**
+ * Checks if a URL is a vault media URL (http://127.0.0.1:PORT/media/UUID).
+ */
+function isVaultMediaUrl(url: string): boolean {
+  const prefix = getVaultMediaPrefix();
+  if (!prefix) {
+    return false;
+  }
+  return url.startsWith(prefix);
+}
+
 /**
  * Common image file extensions for detection.
  */
@@ -79,6 +104,19 @@ export function detectImageReferences(prompt: string): DetectedImageRef[] {
   const refs: DetectedImageRef[] = [];
   const seen = new Set<string>();
 
+  // Helper to add a vault media URL ref
+  const addVaultRef = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed || seen.has(trimmed.toLowerCase())) {
+      return;
+    }
+    if (!isVaultMediaUrl(trimmed)) {
+      return;
+    }
+    seen.add(trimmed.toLowerCase());
+    refs.push({ raw: trimmed, type: "url", resolved: trimmed });
+  };
+
   // Helper to add a path ref
   const addPathRef = (raw: string) => {
     const trimmed = raw.trim();
@@ -86,6 +124,8 @@ export function detectImageReferences(prompt: string): DetectedImageRef[] {
       return;
     }
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+      // Allow vault media URLs through
+      addVaultRef(trimmed);
       return;
     }
     if (!isImageExtension(trimmed)) {
@@ -107,6 +147,17 @@ export function detectImageReferences(prompt: string): DetectedImageRef[] {
     // Skip "[media attached: N files]" header lines
     if (/^\d+\s+files?$/i.test(content.trim())) {
       continue;
+    }
+
+    // Try vault media URL first (no file extension needed).
+    // Format: http://127.0.0.1:PORT/media/UUID (image/jpeg) | ...
+    const vaultUrlMatch = content.match(/^\s*(https?:\/\/[^\s(|]+)/i);
+    if (vaultUrlMatch?.[1]) {
+      const candidate = vaultUrlMatch[1].trim();
+      if (isVaultMediaUrl(candidate)) {
+        addVaultRef(candidate);
+        continue;
+      }
     }
 
     // Extract path before the (mime/type) or | delimiter
@@ -131,7 +182,20 @@ export function detectImageReferences(prompt: string): DetectedImageRef[] {
     }
   }
 
-  // Remote HTTP(S) URLs are intentionally ignored. Native image injection is local-only.
+  // Remote HTTP(S) URLs are intentionally ignored — except vault media URLs.
+  // Scan for standalone vault media URLs in the prompt text (e.g. in [Image: source: ...] or bare).
+  // Pattern: prefix + UUID + optional extension (e.g., .jpg, .png)
+  const vaultPrefix = getVaultMediaPrefix();
+  if (vaultPrefix) {
+    const escapedPrefix = vaultPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const vaultUrlPattern = new RegExp(
+      `${escapedPrefix}[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?:\\.\\w+)?`,
+      "gi",
+    );
+    while ((match = vaultUrlPattern.exec(prompt)) !== null) {
+      addVaultRef(match[0]);
+    }
+  }
 
   // Pattern for file:// URLs - treat as paths since loadWebMedia handles them
   const fileUrlPattern = /file:\/\/[^\s<>"'`\]]+\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|heif)/gi;
@@ -187,8 +251,23 @@ export async function loadImageFromRef(
   try {
     let targetPath = ref.resolved;
 
-    // Remote URL loading is disabled (local-only).
+    // Remote URL loading is disabled (local-only) — except vault media URLs.
     if (ref.type === "url") {
+      if (isVaultMediaUrl(ref.resolved)) {
+        // Vault media URLs are safe loopback requests — load directly.
+        const vaultPrefix = getVaultMediaPrefix();
+        const media = await loadWebMedia(ref.resolved, {
+          maxBytes: options?.maxBytes,
+          urlAllowlistPrefixes: vaultPrefix ? [vaultPrefix.replace(/\/$/, "")] : undefined,
+        });
+        if (media.kind !== "image") {
+          log.debug(`Native image: vault URL not an image: ${ref.resolved} (got ${media.kind})`);
+          return null;
+        }
+        const mimeType = media.contentType ?? "image/jpeg";
+        const data = media.buffer.toString("base64");
+        return { type: "image", data, mimeType };
+      }
       log.debug(`Native image: rejecting remote URL (local-only): ${ref.resolved}`);
       return null;
     }

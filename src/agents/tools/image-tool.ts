@@ -331,6 +331,17 @@ async function runImagePrompt(params: {
   };
 }
 
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+
+function getVaultMediaAllowlistPrefix(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const raw = g[VAULT_READER_KEY];
+  if (typeof raw === "string" && raw.trim()) {
+    return `${raw.trim().replace(/\/+$/, "")}/media`;
+  }
+  return null;
+}
+
 export function createImageTool(options?: {
   config?: OpenClawConfig;
   agentDir?: string;
@@ -526,6 +537,10 @@ export function createImageTool(options?: {
             : await loadWebMedia(resolvedPath ?? resolvedImage, {
                 maxBytes,
                 localRoots,
+                urlAllowlistPrefixes: (() => {
+                  const vaultPrefix = getVaultMediaAllowlistPrefix();
+                  return vaultPrefix ? [vaultPrefix] : undefined;
+                })(),
               });
         if (media.kind !== "image") {
           throw new Error(`Unsupported media type: ${media.kind}`);

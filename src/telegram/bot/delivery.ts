@@ -10,7 +10,7 @@ import { retryAsync } from "../../infra/retry.js";
 import { mediaKindFromMime } from "../../media/constants.js";
 import { fetchRemoteMedia } from "../../media/fetch.js";
 import { isGifMedia } from "../../media/mime.js";
-import { saveMediaBuffer } from "../../media/store.js";
+import { saveMediaBuffer, saveMediaToVault } from "../../media/store.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { loadWebMedia } from "../../web/media.js";
 import { withTelegramApiErrorLogging } from "../api-logging.js";
@@ -304,6 +304,17 @@ export async function deliverReplies(params: {
   return { delivered: hasDelivered };
 }
 
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+
+function getVaultBaseUrlForMedia(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const raw = g[VAULT_READER_KEY];
+  if (typeof raw === "string" && raw.trim()) {
+    return raw.trim().replace(/\/+$/, "");
+  }
+  return null;
+}
+
 export async function resolveMedia(
   ctx: TelegramContext,
   maxBytes: number,
@@ -316,6 +327,7 @@ export async function resolveMedia(
   stickerMetadata?: StickerMetadata;
 } | null> {
   const msg = ctx.message;
+  const vaultBaseUrl = getVaultBaseUrlForMedia();
   const downloadAndSaveTelegramFile = async (filePath: string, fetchImpl: typeof fetch) => {
     const url = `https://api.telegram.org/file/bot${token}/${filePath}`;
     const fetched = await fetchRemoteMedia({
@@ -324,6 +336,20 @@ export async function resolveMedia(
       filePathHint: filePath,
     });
     const originalName = fetched.fileName ?? filePath;
+    // Route through vault when available (no files on disk)
+    if (vaultBaseUrl) {
+      try {
+        return await saveMediaToVault(
+          fetched.buffer,
+          vaultBaseUrl,
+          fetched.contentType,
+          originalName,
+          maxBytes,
+        );
+      } catch (err) {
+        logVerbose(`telegram: vault media save failed, falling back to disk: ${String(err)}`);
+      }
+    }
     return saveMediaBuffer(fetched.buffer, fetched.contentType, "inbound", maxBytes, originalName);
   };
 

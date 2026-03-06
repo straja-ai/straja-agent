@@ -146,17 +146,24 @@ function isHeicSource(opts: { contentType?: string; fileName?: string }): boolea
 
 const VAULT_SCREENSHOT_FETCH_BASE_PATH = "/connections/browser/screenshots/file";
 const VAULT_ARTIFACT_FETCH_BASE_PATH = "/artifacts/download";
+const VAULT_MEDIA_FETCH_BASE_PATH = "/media";
 const VAULT_SCREENSHOT_FETCH_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const VAULT_SCREENSHOT_FETCH_TOKEN_RE = /^[A-Fa-f0-9]{64}$/;
+// UUID with optional file extension (e.g., "abc-...-uuid" or "abc-...-uuid.jpg")
+const VAULT_MEDIA_ID_RE =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?:\.\w+)?$/i;
 
 const VAULT_STRICT_BASE_PATHS = new Set([
   VAULT_SCREENSHOT_FETCH_BASE_PATH,
   VAULT_ARTIFACT_FETCH_BASE_PATH,
+  VAULT_MEDIA_FETCH_BASE_PATH,
 ]);
+
+const VAULT_LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost"]);
 
 type StrictMediaUrlAllowRule = {
   protocol: "http:";
-  hostname: "127.0.0.1";
+  hostname: string;
   port: string;
   basePath: string;
 };
@@ -180,7 +187,7 @@ function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaU
     if (parsed.protocol !== "http:") {
       continue;
     }
-    if (parsed.hostname !== "127.0.0.1") {
+    if (!VAULT_LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
       continue;
     }
     const normalizedPath = parsed.pathname.replace(/\/+$/, "");
@@ -192,7 +199,7 @@ function parseStrictMediaUrlAllowRules(values?: readonly string[]): StrictMediaU
     }
     rules.push({
       protocol: "http:",
-      hostname: "127.0.0.1",
+      hostname: parsed.hostname,
       port: parsed.port || "80",
       basePath: normalizedPath,
     });
@@ -204,7 +211,12 @@ function matchesStrictMediaUrlAllowRule(url: URL, rule: StrictMediaUrlAllowRule)
   if (url.protocol !== rule.protocol) {
     return false;
   }
-  if (url.hostname !== rule.hostname) {
+  // Accept both localhost and 127.0.0.1 as equivalent loopback hostnames.
+  const urlIsLoopback = VAULT_LOOPBACK_HOSTNAMES.has(url.hostname);
+  const ruleIsLoopback = VAULT_LOOPBACK_HOSTNAMES.has(rule.hostname);
+  if (urlIsLoopback && ruleIsLoopback) {
+    // Both are loopback — treat as matching regardless of exact hostname.
+  } else if (url.hostname !== rule.hostname) {
     return false;
   }
   if ((url.port || "80") !== rule.port) {
@@ -244,6 +256,23 @@ function matchesStrictMediaUrlAllowRule(url: URL, rule: StrictMediaUrlAllowRule)
       return false;
     }
     if (!VAULT_SCREENSHOT_FETCH_TOKEN_RE.test(token)) {
+      return false;
+    }
+    return true;
+  }
+
+  // Vault media pattern: /media/<uuid>
+  if (rule.basePath === VAULT_MEDIA_FETCH_BASE_PATH) {
+    const prefix = `${rule.basePath}/`;
+    if (!url.pathname.startsWith(prefix)) {
+      return false;
+    }
+    const mediaId = url.pathname.slice(prefix.length);
+    if (!VAULT_MEDIA_ID_RE.test(mediaId) || mediaId.includes("/")) {
+      return false;
+    }
+    // No query params or hash expected
+    if (url.search || url.hash) {
       return false;
     }
     return true;

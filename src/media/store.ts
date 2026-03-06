@@ -290,6 +290,75 @@ export async function saveMediaSource(
   }
 }
 
+/**
+ * Save media to the vault's ephemeral _media collection via HTTP POST.
+ * Returns a SavedMedia whose `path` is a vault HTTP URL (e.g. http://127.0.0.1:8181/media/{id}).
+ * Falls back to `saveMediaBuffer()` (disk) if the vault is unreachable or returns an error.
+ */
+export async function saveMediaToVault(
+  buffer: Buffer,
+  vaultBaseUrl: string,
+  contentType?: string,
+  originalFilename?: string,
+  maxBytes = MAX_BYTES,
+): Promise<SavedMedia> {
+  if (buffer.byteLength > maxBytes) {
+    throw new Error(`Media exceeds ${(maxBytes / (1024 * 1024)).toFixed(0)}MB limit`);
+  }
+
+  const url = `${vaultBaseUrl.replace(/\/+$/, "")}/media`;
+  const headers: Record<string, string> = {
+    "Content-Type": contentType || "application/octet-stream",
+  };
+  if (originalFilename) {
+    headers["X-Original-Name"] = originalFilename;
+  }
+
+  const parsedUrl = new URL(url);
+  const isHttps = parsedUrl.protocol === "https:";
+  const requestFn = isHttps ? httpsRequestImpl : httpRequestImpl;
+
+  const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const req = requestFn(parsedUrl, { method: "POST", headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString("utf-8"),
+        });
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end(buffer);
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`Vault POST /media returned HTTP ${response.status}: ${response.body}`);
+  }
+
+  const result = JSON.parse(response.body) as {
+    id: string;
+    url: string;
+    contentType?: string;
+    size: number;
+    path: string;
+  };
+
+  // Build the full vault URL from the known base + returned docPath.
+  // Don't rely on result.url because the Host header may differ from the base URL
+  // the agent uses (e.g. 127.0.0.1 vs localhost).
+  const mediaUrl = `${vaultBaseUrl.replace(/\/+$/, "")}/media/${result.path}`;
+
+  return {
+    id: result.id,
+    path: mediaUrl, // vault HTTP URL
+    size: result.size,
+    contentType: result.contentType,
+  };
+}
+
 export async function saveMediaBuffer(
   buffer: Buffer,
   contentType?: string,
