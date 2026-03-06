@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { registerAuditPatch } from "./src/audit-patch.js";
 import { registerAuthProfilesPatch } from "./src/auth-profiles-patch.js";
 import { registerBootstrapPatch } from "./src/bootstrap-patch.js";
 import { registerCredentialsPatch } from "./src/credentials-patch.js";
@@ -66,6 +67,7 @@ let authProfilesPatched = false;
 let credentialsPatched = false;
 let deliveryQueuePatched = false;
 let logsPatched = false;
+let auditPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
 
@@ -299,6 +301,13 @@ const plugin = {
       registerLogsPatch(baseUrl);
       logsPatched = true;
       api.logger.info("Logs patch registered (commands.log + config-audit.jsonl → vault _logs)");
+    }
+
+    // Register audit patch — routes agent-side audit entries through vault _audit.
+    if (!auditPatched) {
+      registerAuditPatch(baseUrl);
+      auditPatched = true;
+      api.logger.info("Audit patch registered (audit entries → vault _audit collection)");
     }
 
     // Register vault-backed session memory hook.

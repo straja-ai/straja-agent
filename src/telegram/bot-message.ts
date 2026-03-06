@@ -10,6 +10,24 @@ import { dispatchTelegramMessage } from "./bot-message-dispatch.js";
 import type { TelegramBotOptions } from "./bot.js";
 import type { TelegramContext, TelegramStreamMode } from "./bot/types.js";
 
+// ---------------------------------------------------------------------------
+// Vault audit consumer — routes messaging audit entries through vault
+// ---------------------------------------------------------------------------
+
+const AUDIT_PATCH_KEY = Symbol.for("openclaw.auditPatchCallback");
+
+type AuditPatchOps = {
+  appendEntry(category: string, entry: Record<string, unknown>): Promise<void>;
+};
+
+function resolveVaultAuditOps(): AuditPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[AUDIT_PATCH_KEY] as (() => AuditPatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 /** Dependencies injected once when creating the message processor. */
 type TelegramMessageProcessorDeps = Omit<
   BuildTelegramMessageContextParams,
@@ -85,5 +103,33 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       telegramCfg,
       opts,
     });
+
+    // Audit: inbound Telegram message processed
+    try {
+      const ops = resolveVaultAuditOps();
+      if (ops) {
+        const msg = primaryCtx.message;
+        ops
+          .appendEntry("messaging", {
+            timestamp: new Date().toISOString(),
+            toolName: "messaging",
+            action: "receive",
+            channel: "telegram",
+            verdict: "allowed",
+            reason: "Inbound message processed",
+            severity: "low",
+            details: {
+              chatId: msg.chat?.id,
+              userId: msg.from?.id,
+              messageLength: (msg.text ?? msg.caption ?? "").length,
+              mediaCount: allMedia.length,
+              accountId: account,
+            },
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // Audit must never break message processing
+    }
   };
 };

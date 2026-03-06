@@ -30,6 +30,39 @@ import type { sendMessageWhatsApp } from "../../web/outbound.js";
 import { throwIfAborted } from "./abort.js";
 import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js";
 import type { OutboundIdentity } from "./identity.js";
+
+// ---------------------------------------------------------------------------
+// Vault audit consumer — routes messaging audit entries through vault
+// ---------------------------------------------------------------------------
+
+const AUDIT_PATCH_KEY = Symbol.for("openclaw.auditPatchCallback");
+
+type AuditPatchOps = {
+  appendEntry(category: string, entry: Record<string, unknown>): Promise<void>;
+};
+
+function resolveVaultAuditOps(): AuditPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[AUDIT_PATCH_KEY] as (() => AuditPatchOps) | undefined;
+  return factory?.();
+}
+
+function emitMessagingAudit(entry: Record<string, unknown>): void {
+  try {
+    const ops = resolveVaultAuditOps();
+    if (ops) {
+      ops
+        .appendEntry("messaging", {
+          timestamp: new Date().toISOString(),
+          toolName: "messaging",
+          ...entry,
+        })
+        .catch(() => {});
+    }
+  } catch {
+    // Audit must never break delivery
+  }
+}
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
 import type { OutboundChannel } from "./targets.js";
@@ -264,8 +297,34 @@ export async function deliverOutboundPayloads(
     if (queueId) {
       if (hadPartialFailure) {
         await failDelivery(queueId, "partial delivery failure (bestEffort)").catch(() => {});
+        emitMessagingAudit({
+          action: "send",
+          channel,
+          target: to,
+          verdict: "error",
+          reason: "partial delivery failure (bestEffort)",
+          severity: "medium",
+          details: {
+            accountId: params.accountId,
+            payloadCount: payloads.length,
+            threadId: params.threadId,
+          },
+        });
       } else {
         await ackDelivery(queueId).catch(() => {}); // Best-effort cleanup.
+        emitMessagingAudit({
+          action: "send",
+          channel,
+          target: to,
+          verdict: "allowed",
+          reason: "Delivered successfully",
+          severity: "low",
+          details: {
+            accountId: params.accountId,
+            payloadCount: payloads.length,
+            threadId: params.threadId,
+          },
+        });
       }
     }
     return results;
@@ -277,6 +336,19 @@ export async function deliverOutboundPayloads(
         await failDelivery(queueId, err instanceof Error ? err.message : String(err)).catch(
           () => {},
         );
+        emitMessagingAudit({
+          action: "send",
+          channel,
+          target: to,
+          verdict: "error",
+          reason: err instanceof Error ? err.message : String(err),
+          severity: "high",
+          details: {
+            accountId: params.accountId,
+            payloadCount: payloads.length,
+            threadId: params.threadId,
+          },
+        });
       }
     }
     throw err;
