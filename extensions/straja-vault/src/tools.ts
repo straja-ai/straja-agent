@@ -192,6 +192,34 @@ export const VaultWebFetchSchema = Type.Object({
   ),
 });
 
+export const VaultApproveDomainSchema = Type.Object({
+  domain: Type.String({
+    description:
+      "The domain to approve or remove (e.g. 'bbc.com', 'cnn.com'). " +
+      "Use the domain from the blocked-domain error message.",
+  }),
+  decision: Type.Union([Type.Literal("once"), Type.Literal("always"), Type.Literal("remove")], {
+    description:
+      '"once" for one-time access (domain stays off the permanent allow list), ' +
+      '"always" to add the domain permanently to the allow list, ' +
+      '"remove" to revoke a previously approved domain from the allow list.',
+  }),
+  scope: Type.Optional(
+    Type.Union([Type.Literal("web-fetch"), Type.Literal("browser"), Type.Literal("all")], {
+      description:
+        'Which subsystem to approve: "web-fetch", "browser", or "all" (both). Default: "all".',
+      default: "all",
+    }),
+  ),
+  capability: Type.Optional(
+    Type.Union([Type.Literal("navigate"), Type.Literal("post"), Type.Literal("all")], {
+      description:
+        'What to approve: "navigate" for domain allowlist (default), "post" for form submissions, "all" for both.',
+      default: "navigate",
+    }),
+  ),
+});
+
 // ---------------------------------------------------------------------------
 // Gmail Draft Schema
 // ---------------------------------------------------------------------------
@@ -2289,6 +2317,86 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   };
 
   // ---------------------------------------------------------------------------
+  // Domain Approval — approve a blocked domain for web-fetch / browser
+  // ---------------------------------------------------------------------------
+
+  const vaultApproveDomain: AnyAgentTool = {
+    name: "vault_approve_domain",
+    label: "Approve Domain",
+    description:
+      "Manage domain access for web-fetch, browser navigation, and form submissions. " +
+      "Call with 'once' or 'always' when a fetch, navigation, or form submit is blocked and the user approves. " +
+      'Call with "remove" to revoke. Use capability "navigate" (default) for domain allowlist, "post" for form submissions, or "all" for both. ' +
+      "After approval, retry the original action — it will succeed.",
+    parameters: VaultApproveDomainSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const domain = String(params.domain || "")
+        .trim()
+        .toLowerCase();
+      if (!domain) {
+        return { content: [{ type: "text" as const, text: "Error: domain is required." }] };
+      }
+
+      const decision = String(params.decision || "");
+      if (decision !== "once" && decision !== "always" && decision !== "remove") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: 'Error: decision must be "once", "always", or "remove".',
+            },
+          ],
+        };
+      }
+
+      const scope = String(params.scope || "all");
+      const capability = String(params.capability || "navigate");
+
+      try {
+        const resp = await fetch(`${baseUrl}/connections/approve-domain`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domain, decision, scope, capability }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Domain approval error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as {
+          ok: boolean;
+          domain: string;
+          decision: string;
+          message: string;
+        };
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: data.message || `Domain ${domain} approved (${decision}).`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // ---------------------------------------------------------------------------
   // Browser tools — proxy to vault's playwright-mcp browser service
   // ---------------------------------------------------------------------------
 
@@ -2605,6 +2713,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultArtifactUrl,
     vaultWebSearchDuckDuckGo,
     vaultWebFetch,
+    vaultApproveDomain,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
     vaultCalendarCreateEvent,
