@@ -71,6 +71,24 @@ const SHELL_ENV_EXPECTED_KEYS = [
 const CONFIG_AUDIT_LOG_FILENAME = "config-audit.jsonl";
 const loggedInvalidConfigs = new Set<string>();
 
+// ---------------------------------------------------------------------------
+// Vault patch consumer — routes config audit logs through vault when available
+// ---------------------------------------------------------------------------
+
+const LOGS_PATCH_KEY = Symbol.for("openclaw.logsPatchCallback");
+
+type LogsPatchOps = {
+  appendLine(logName: string, line: string): Promise<void>;
+};
+
+function resolveVaultLogsOps(): LogsPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[LOGS_PATCH_KEY] as (() => LogsPatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 type ConfigWriteAuditResult = "rename" | "copy-fallback" | "failed";
 
 type ConfigWriteAuditRecord = {
@@ -378,6 +396,14 @@ async function appendConfigWriteAuditRecord(
   record: ConfigWriteAuditRecord,
 ): Promise<void> {
   try {
+    // Vault path: append to vault's _logs collection.
+    const vaultOps = resolveVaultLogsOps();
+    if (vaultOps) {
+      await vaultOps.appendLine("config-audit.jsonl", JSON.stringify(record));
+      return;
+    }
+
+    // Disk path (original).
     const auditPath = resolveConfigAuditLogPath(deps.env, deps.homedir);
     await deps.fs.promises.mkdir(path.dirname(auditPath), { recursive: true, mode: 0o700 });
     await deps.fs.promises.appendFile(auditPath, `${JSON.stringify(record)}\n`, {

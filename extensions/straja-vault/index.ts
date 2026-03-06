@@ -4,8 +4,10 @@ import { registerAuthProfilesPatch } from "./src/auth-profiles-patch.js";
 import { registerBootstrapPatch } from "./src/bootstrap-patch.js";
 import { registerCredentialsPatch } from "./src/credentials-patch.js";
 import { registerCronStorePatch } from "./src/cron-store-patch.js";
+import { registerDeliveryQueuePatch } from "./src/delivery-queue-patch.js";
 import { registerFsToolsPatch } from "./src/fs-tools-patch.js";
 import { registerGatewayWorkspacePatch } from "./src/gateway-workspace-patch.js";
+import { registerLogsPatch } from "./src/logs-patch.js";
 import { registerSessionPatch } from "./src/session-patch.js";
 import { registerSessionStorePatch } from "./src/session-store-patch.js";
 import { registerSubagentRegistryPatch } from "./src/subagent-registry-patch.js";
@@ -62,6 +64,8 @@ let sessionStorePatched = false;
 let subagentRegistryPatched = false;
 let authProfilesPatched = false;
 let credentialsPatched = false;
+let deliveryQueuePatched = false;
+let logsPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
 
@@ -281,6 +285,20 @@ const plugin = {
       registerCredentialsPatch(baseUrl);
       credentialsPatched = true;
       api.logger.info("Credentials patch registered (pairing/allowFrom → vault _credentials)");
+    }
+
+    // Register delivery queue patch — routes delivery-queue/*.json through vault.
+    if (!deliveryQueuePatched) {
+      registerDeliveryQueuePatch(baseUrl);
+      deliveryQueuePatched = true;
+      api.logger.info("Delivery queue patch registered (delivery-queue → vault _delivery_queue)");
+    }
+
+    // Register logs patch — routes commands.log + config-audit.jsonl through vault.
+    if (!logsPatched) {
+      registerLogsPatch(baseUrl);
+      logsPatched = true;
+      api.logger.info("Logs patch registered (commands.log + config-audit.jsonl → vault _logs)");
     }
 
     // Register vault-backed session memory hook.

@@ -10,6 +10,25 @@ const QUEUE_DIRNAME = "delivery-queue";
 const FAILED_DIRNAME = "failed";
 const MAX_RETRIES = 5;
 
+// ---------------------------------------------------------------------------
+// Vault patch consumer — routes delivery queue through vault when available
+// ---------------------------------------------------------------------------
+
+const DELIVERY_QUEUE_PATCH_KEY = Symbol.for("openclaw.deliveryQueuePatchCallback");
+
+type DeliveryQueuePatchOps = {
+  loadQueue(key: "pending" | "failed"): Promise<Record<string, unknown>>;
+  saveQueue(key: "pending" | "failed", entries: Record<string, unknown>): Promise<void>;
+};
+
+function resolveVaultDeliveryQueueOps(): DeliveryQueuePatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[DELIVERY_QUEUE_PATCH_KEY] as (() => DeliveryQueuePatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 /** Backoff delays in milliseconds indexed by retry count (1-based). */
 const BACKOFF_MS: readonly number[] = [
   5_000, // retry 1: 5s
@@ -58,6 +77,11 @@ function resolveFailedDir(stateDir?: string): string {
 
 /** Ensure the queue directory (and failed/ subdirectory) exist. */
 export async function ensureQueueDir(stateDir?: string): Promise<string> {
+  // Vault path: no directories needed — vault uses aggregate documents.
+  if (resolveVaultDeliveryQueueOps()) {
+    return "";
+  }
+
   const queueDir = resolveQueueDir(stateDir);
   await fs.promises.mkdir(queueDir, { recursive: true, mode: 0o700 });
   await fs.promises.mkdir(resolveFailedDir(stateDir), { recursive: true, mode: 0o700 });
@@ -82,7 +106,6 @@ export async function enqueueDelivery(
   params: QueuedDeliveryParams,
   stateDir?: string,
 ): Promise<string> {
-  const queueDir = await ensureQueueDir(stateDir);
   const id = crypto.randomUUID();
   const entry: QueuedDelivery = {
     id,
@@ -99,6 +122,18 @@ export async function enqueueDelivery(
     mirror: params.mirror,
     retryCount: 0,
   };
+
+  // Vault path: add entry to the aggregate pending document.
+  const vaultOps = resolveVaultDeliveryQueueOps();
+  if (vaultOps) {
+    const pending = await vaultOps.loadQueue("pending");
+    pending[id] = entry;
+    await vaultOps.saveQueue("pending", pending);
+    return id;
+  }
+
+  // Disk path (original).
+  const queueDir = await ensureQueueDir(stateDir);
   const filePath = path.join(queueDir, `${id}.json`);
   const tmp = `${filePath}.${process.pid}.tmp`;
   const json = JSON.stringify(entry, null, 2);
@@ -109,6 +144,16 @@ export async function enqueueDelivery(
 
 /** Remove a successfully delivered entry from the queue. */
 export async function ackDelivery(id: string, stateDir?: string): Promise<void> {
+  // Vault path: remove entry from the aggregate pending document.
+  const vaultOps = resolveVaultDeliveryQueueOps();
+  if (vaultOps) {
+    const pending = await vaultOps.loadQueue("pending");
+    delete pending[id];
+    await vaultOps.saveQueue("pending", pending);
+    return;
+  }
+
+  // Disk path (original).
   const filePath = path.join(resolveQueueDir(stateDir), `${id}.json`);
   try {
     await fs.promises.unlink(filePath);
@@ -126,6 +171,21 @@ export async function ackDelivery(id: string, stateDir?: string): Promise<void> 
 
 /** Update a queue entry after a failed delivery attempt. */
 export async function failDelivery(id: string, error: string, stateDir?: string): Promise<void> {
+  // Vault path: update entry in the aggregate pending document.
+  const vaultOps = resolveVaultDeliveryQueueOps();
+  if (vaultOps) {
+    const pending = await vaultOps.loadQueue("pending");
+    const entry = pending[id] as QueuedDelivery | undefined;
+    if (entry) {
+      entry.retryCount = (entry.retryCount ?? 0) + 1;
+      entry.lastError = error;
+      pending[id] = entry;
+      await vaultOps.saveQueue("pending", pending);
+    }
+    return;
+  }
+
+  // Disk path (original).
   const filePath = path.join(resolveQueueDir(stateDir), `${id}.json`);
   const raw = await fs.promises.readFile(filePath, "utf-8");
   const entry: QueuedDelivery = JSON.parse(raw);
@@ -141,6 +201,49 @@ export async function failDelivery(id: string, error: string, stateDir?: string)
 
 /** Load all pending delivery entries from the queue directory. */
 export async function loadPendingDeliveries(stateDir?: string): Promise<QueuedDelivery[]> {
+  // Vault path: load from aggregate pending document.
+  const vaultOps = resolveVaultDeliveryQueueOps();
+  if (vaultOps) {
+    let pending = await vaultOps.loadQueue("pending");
+
+    // One-time disk→vault migration: if vault is empty, check disk for existing entries.
+    if (Object.keys(pending).length === 0) {
+      const queueDir = resolveQueueDir(stateDir);
+      try {
+        const files = await fs.promises.readdir(queueDir);
+        const diskEntries: Record<string, QueuedDelivery> = {};
+        for (const file of files) {
+          if (!file.endsWith(".json")) {
+            continue;
+          }
+          const filePath = path.join(queueDir, file);
+          try {
+            const stat = await fs.promises.stat(filePath);
+            if (!stat.isFile()) {
+              continue;
+            }
+            const raw = await fs.promises.readFile(filePath, "utf-8");
+            const entry = JSON.parse(raw) as QueuedDelivery;
+            if (entry.id) {
+              diskEntries[entry.id] = entry;
+            }
+          } catch {
+            // Skip malformed entries
+          }
+        }
+        if (Object.keys(diskEntries).length > 0) {
+          await vaultOps.saveQueue("pending", diskEntries);
+          pending = diskEntries;
+        }
+      } catch {
+        // No disk directory or inaccessible — no migration needed.
+      }
+    }
+
+    return Object.values(pending) as QueuedDelivery[];
+  }
+
+  // Disk path (original).
   const queueDir = resolveQueueDir(stateDir);
   let files: string[];
   try {
@@ -177,6 +280,22 @@ export async function loadPendingDeliveries(stateDir?: string): Promise<QueuedDe
 
 /** Move a queue entry to the failed/ subdirectory. */
 export async function moveToFailed(id: string, stateDir?: string): Promise<void> {
+  // Vault path: move entry from pending to failed aggregate document.
+  const vaultOps = resolveVaultDeliveryQueueOps();
+  if (vaultOps) {
+    const pending = await vaultOps.loadQueue("pending");
+    const entry = pending[id];
+    if (entry) {
+      delete pending[id];
+      const failed = await vaultOps.loadQueue("failed");
+      failed[id] = entry;
+      await vaultOps.saveQueue("pending", pending);
+      await vaultOps.saveQueue("failed", failed);
+    }
+    return;
+  }
+
+  // Disk path (original).
   const queueDir = resolveQueueDir(stateDir);
   const failedDir = resolveFailedDir(stateDir);
   await fs.promises.mkdir(failedDir, { recursive: true, mode: 0o700 });
