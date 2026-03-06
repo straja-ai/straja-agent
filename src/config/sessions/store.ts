@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { parseByteSize } from "../../cli/parse-bytes.js";
 import { parseDurationMs } from "../../cli/parse-duration.js";
@@ -181,6 +182,29 @@ export function loadSessionStore(
     store = loaded;
   } else {
     throw new Error("vault session store payload is not an object");
+  }
+
+  // One-time migration: if vault is empty, check disk for existing sessions.json
+  if (Object.keys(store).length === 0) {
+    try {
+      const diskRaw = fs.readFileSync(storePath, "utf-8");
+      if (diskRaw && diskRaw.trim().length > 2) {
+        const diskStore = JSON.parse(diskRaw) as unknown;
+        if (diskStore && typeof diskStore === "object" && !Array.isArray(diskStore)) {
+          const diskRecord = diskStore as Record<string, unknown>;
+          if (Object.keys(diskRecord).length > 0) {
+            log.info("migrating sessions.json from disk to vault", {
+              storePath,
+              entries: Object.keys(diskRecord).length,
+            });
+            vaultOps.saveSessionStore(storePath, diskRecord);
+            store = diskRecord as Record<string, SessionEntry>;
+          }
+        }
+      }
+    } catch {
+      // No disk file or invalid — start fresh
+    }
   }
 
   // Best-effort migration: message provider → channel naming.

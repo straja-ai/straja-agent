@@ -8,6 +8,25 @@ import { syncExternalCliCredentials } from "./external-cli-sync.js";
 import { ensureAuthStoreFile, resolveAuthStorePath, resolveLegacyAuthStorePath } from "./paths.js";
 import type { AuthProfileCredential, AuthProfileStore, ProfileUsageStats } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// Vault patch consumer — routes auth-profiles through vault when available
+// ---------------------------------------------------------------------------
+
+const AUTH_PROFILES_PATCH_KEY = Symbol.for("openclaw.authProfileStorePatchCallback");
+
+type AuthProfileStorePatchOps = {
+  loadAuthProfileStore: (storePath: string) => AuthProfileStore;
+  saveAuthProfileStore: (storePath: string, store: AuthProfileStore) => void;
+};
+
+function resolveVaultAuthProfileOps(): AuthProfileStorePatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[AUTH_PROFILES_PATCH_KEY] as (() => AuthProfileStorePatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 type LegacyAuthStore = Record<string, AuthProfileCredential>;
 
 function _syncAuthProfileStore(target: AuthProfileStore, source: AuthProfileStore): void {
@@ -22,6 +41,22 @@ export async function updateAuthProfileStoreWithLock(params: {
   agentDir?: string;
   updater: (store: AuthProfileStore) => boolean;
 }): Promise<AuthProfileStore | null> {
+  const vaultOps = resolveVaultAuthProfileOps();
+
+  // When vault is active, skip file lock (vault handles atomicity).
+  if (vaultOps) {
+    try {
+      const store = ensureAuthProfileStore(params.agentDir);
+      const shouldSave = params.updater(store);
+      if (shouldSave) {
+        saveAuthProfileStore(store, params.agentDir);
+      }
+      return store;
+    } catch {
+      return null;
+    }
+  }
+
   const authPath = resolveAuthStorePath(params.agentDir);
   ensureAuthStoreFile(authPath);
 
@@ -221,6 +256,32 @@ function applyLegacyStore(store: AuthProfileStore, legacy: LegacyAuthStore): voi
 }
 
 export function loadAuthProfileStore(): AuthProfileStore {
+  const vaultOps = resolveVaultAuthProfileOps();
+
+  // Vault path: load from vault, sync external CLIs, save back if changed.
+  if (vaultOps) {
+    const authPath = resolveAuthStorePath();
+    let store = vaultOps.loadAuthProfileStore(authPath);
+
+    // One-time migration: if vault is empty, check disk for existing auth-profiles
+    if (Object.keys(store.profiles).length === 0) {
+      const diskRaw = loadJsonFile(authPath);
+      const diskStore = coerceAuthStore(diskRaw);
+      if (diskStore && Object.keys(diskStore.profiles).length > 0) {
+        log.info("migrating auth-profiles from disk to vault");
+        vaultOps.saveAuthProfileStore(authPath, diskStore);
+        store = diskStore;
+      }
+    }
+
+    const synced = syncExternalCliCredentials(store);
+    if (synced) {
+      vaultOps.saveAuthProfileStore(authPath, store);
+    }
+    return store;
+  }
+
+  // Disk path (original)
   const authPath = resolveAuthStorePath();
   const raw = loadJsonFile(authPath);
   const asStore = coerceAuthStore(raw);
@@ -254,6 +315,33 @@ function loadAuthProfileStoreForAgent(
   agentDir?: string,
   _options?: { allowKeychainPrompt?: boolean },
 ): AuthProfileStore {
+  const vaultOps = resolveVaultAuthProfileOps();
+
+  // Vault path: single shared store, no per-agent-dir separation needed.
+  // Vault is the single source of truth — skip legacy migration, skip subagent inheritance.
+  if (vaultOps) {
+    const authPath = resolveAuthStorePath(agentDir);
+    let store = vaultOps.loadAuthProfileStore(authPath);
+
+    // One-time migration: if vault is empty, check disk for existing auth-profiles
+    if (Object.keys(store.profiles).length === 0) {
+      const diskRaw = loadJsonFile(authPath);
+      const diskStore = coerceAuthStore(diskRaw);
+      if (diskStore && Object.keys(diskStore.profiles).length > 0) {
+        log.info("migrating auth-profiles from disk to vault", { agentDir });
+        vaultOps.saveAuthProfileStore(authPath, diskStore);
+        store = diskStore;
+      }
+    }
+
+    const synced = syncExternalCliCredentials(store);
+    if (synced) {
+      vaultOps.saveAuthProfileStore(authPath, store);
+    }
+    return store;
+  }
+
+  // Disk path (original)
   const authPath = resolveAuthStorePath(agentDir);
   const raw = loadJsonFile(authPath);
   const asStore = coerceAuthStore(raw);
@@ -342,5 +430,12 @@ export function saveAuthProfileStore(store: AuthProfileStore, agentDir?: string)
     lastGood: store.lastGood ?? undefined,
     usageStats: store.usageStats ?? undefined,
   } satisfies AuthProfileStore;
+
+  const vaultOps = resolveVaultAuthProfileOps();
+  if (vaultOps) {
+    vaultOps.saveAuthProfileStore(authPath, payload);
+    return;
+  }
+
   saveJsonFile(authPath, payload);
 }

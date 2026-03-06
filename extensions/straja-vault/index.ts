@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { registerAuthProfilesPatch } from "./src/auth-profiles-patch.js";
 import { registerBootstrapPatch } from "./src/bootstrap-patch.js";
+import { registerCredentialsPatch } from "./src/credentials-patch.js";
 import { registerCronStorePatch } from "./src/cron-store-patch.js";
 import { registerFsToolsPatch } from "./src/fs-tools-patch.js";
 import { registerGatewayWorkspacePatch } from "./src/gateway-workspace-patch.js";
@@ -58,6 +60,8 @@ let gatewayWorkspacePatched = false;
 let cronStorePatched = false;
 let sessionStorePatched = false;
 let subagentRegistryPatched = false;
+let authProfilesPatched = false;
+let credentialsPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
 
@@ -263,6 +267,20 @@ const plugin = {
       registerSubagentRegistryPatch(baseUrl);
       subagentRegistryPatched = true;
       api.logger.info("Subagent registry patch registered (runs.json → vault _subagents)");
+    }
+
+    // Register auth-profiles patch — routes auth-profiles.json through vault.
+    if (!authProfilesPatched) {
+      registerAuthProfilesPatch(baseUrl);
+      authProfilesPatched = true;
+      api.logger.info("Auth profiles patch registered (auth-profiles.json → vault _auth_profiles)");
+    }
+
+    // Register credentials patch — routes pairing/allowFrom files through vault.
+    if (!credentialsPatched) {
+      registerCredentialsPatch(baseUrl);
+      credentialsPatched = true;
+      api.logger.info("Credentials patch registered (pairing/allowFrom → vault _credentials)");
     }
 
     // Register vault-backed session memory hook.

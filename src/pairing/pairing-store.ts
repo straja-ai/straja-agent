@@ -9,6 +9,27 @@ import { withFileLock as withPathLock } from "../infra/file-lock.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import { readJsonFileWithFallback, writeJsonFileAtomically } from "../plugin-sdk/json-store.js";
 
+// ---------------------------------------------------------------------------
+// Vault patch consumer — routes credentials through vault when available
+// ---------------------------------------------------------------------------
+
+const CREDENTIALS_PATCH_KEY = Symbol.for("openclaw.credentialsPatchCallback");
+
+type CredentialsPatchOps = {
+  readJsonFile: <T>(filePath: string, fallback: T) => Promise<{ value: T; exists: boolean }>;
+  writeJsonFile: (filePath: string, value: unknown) => Promise<void>;
+  readJsonFileSync: (filePath: string) => string | null;
+  fileExists: (filePath: string) => Promise<boolean>;
+};
+
+function resolveVaultCredentialsOps(): CredentialsPatchOps | undefined {
+  const g = globalThis as Record<symbol, unknown>;
+  const factory = g[CREDENTIALS_PATCH_KEY] as (() => CredentialsPatchOps) | undefined;
+  return factory?.();
+}
+
+// ---------------------------------------------------------------------------
+
 const PAIRING_CODE_LENGTH = 8;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PAIRING_PENDING_TTL_MS = 60 * 60 * 1000;
@@ -98,10 +119,29 @@ async function readJsonFile<T>(
   filePath: string,
   fallback: T,
 ): Promise<{ value: T; exists: boolean }> {
+  const vaultOps = resolveVaultCredentialsOps();
+  if (vaultOps) {
+    const result = await vaultOps.readJsonFile(filePath, fallback);
+    if (!result.exists) {
+      // One-time migration: vault is empty, check if disk has data.
+      const diskResult = await readJsonFileWithFallback(filePath, fallback);
+      if (diskResult.exists) {
+        // Migrate disk data to vault
+        await vaultOps.writeJsonFile(filePath, diskResult.value);
+        return diskResult;
+      }
+    }
+    return result;
+  }
   return await readJsonFileWithFallback(filePath, fallback);
 }
 
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
+  const vaultOps = resolveVaultCredentialsOps();
+  if (vaultOps) {
+    await vaultOps.writeJsonFile(filePath, value);
+    return;
+  }
   await writeJsonFileAtomically(filePath, value);
 }
 
@@ -121,6 +161,15 @@ async function readPrunedPairingRequests(filePath: string): Promise<{
 }
 
 async function ensureJsonFile(filePath: string, fallback: unknown) {
+  const vaultOps = resolveVaultCredentialsOps();
+  if (vaultOps) {
+    // Vault: check existence via HTTP HEAD; create if missing.
+    const exists = await vaultOps.fileExists(filePath);
+    if (!exists) {
+      await vaultOps.writeJsonFile(filePath, fallback);
+    }
+    return;
+  }
   try {
     await fs.promises.access(filePath);
   } catch {
@@ -133,6 +182,12 @@ async function withFileLock<T>(
   fallback: unknown,
   fn: () => Promise<T>,
 ): Promise<T> {
+  const vaultOps = resolveVaultCredentialsOps();
+  if (vaultOps) {
+    // Vault: skip filesystem lock, just run the operation.
+    // Vault handles atomicity server-side.
+    return await fn();
+  }
   await ensureJsonFile(filePath, fallback);
   return await withPathLock(filePath, PAIRING_STORE_LOCK_OPTIONS, async () => {
     return await fn();
@@ -270,6 +325,32 @@ async function readAllowFromStateForPath(
 }
 
 function readAllowFromStateForPathSync(channel: PairingChannel, filePath: string): string[] {
+  const vaultOps = resolveVaultCredentialsOps();
+  if (vaultOps) {
+    try {
+      let raw = vaultOps.readJsonFileSync(filePath);
+      if (!raw) {
+        // One-time migration: vault is empty, check if disk has data.
+        try {
+          const diskRaw = fs.readFileSync(filePath, "utf8");
+          if (diskRaw) {
+            // Fire-and-forget: migrate to vault asynchronously
+            void vaultOps.writeJsonFile(filePath, JSON.parse(diskRaw)).catch(() => {});
+            raw = diskRaw;
+          }
+        } catch {
+          // No disk file either — return empty
+        }
+      }
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw) as AllowFromStore;
+      return normalizeAllowFromList(channel, parsed);
+    } catch {
+      return [];
+    }
+  }
   try {
     const raw = fs.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw) as AllowFromStore;
