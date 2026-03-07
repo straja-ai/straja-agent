@@ -64,7 +64,7 @@ function buildMemorySection(params: {
   const hasVaultSearch = params.availableTools.has("vault_search");
   const lines = [
     "## Memory Recall",
-    `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first. If low confidence after search, say you checked.`,
+    `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first.${hasVaultSearch ? ` If memory search returns no results, ALSO run vault_search to check notes, documents, and other collections — the information may be stored outside of memory.` : ""} If low confidence after search, say you checked.`,
     "",
     "## Memory Persistence",
     `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
