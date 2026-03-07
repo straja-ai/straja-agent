@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
+import { vaultFetch } from "./http.js";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -664,7 +665,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/query`, {
+        const resp = await vaultFetch(`${baseUrl}/query`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -730,7 +731,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
 
       try {
         const url = `${baseUrl}/collections/${encodeURIComponent(collection)}/files/${encodeURIComponent(cleanPath)}`;
-        const resp = await fetch(url, { signal });
+        const resp = await vaultFetch(url, { signal });
 
         if (!resp.ok) {
           const errText = await resp.text();
@@ -770,7 +771,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     parameters: VaultStatusSchema,
     async execute(_toolCallId: string, _params: Record<string, unknown>, signal?: AbortSignal) {
       try {
-        const resp = await fetch(`${baseUrl}/status`, { signal });
+        const resp = await vaultFetch(`${baseUrl}/status`, { signal });
 
         if (!resp.ok) {
           const errText = await resp.text();
@@ -840,7 +841,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/exec`, {
+        const resp = await vaultFetch(`${baseUrl}/exec`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -950,7 +951,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       try {
         switch (action) {
           case "list": {
-            const resp = await fetch(`${baseUrl}/exec/sessions`, { signal });
+            const resp = await vaultFetch(`${baseUrl}/exec/sessions`, { signal });
             if (!resp.ok) {
               return {
                 content: [
@@ -995,7 +996,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
             }
             const timeout = typeof params.timeout === "number" ? params.timeout : 0;
             const url = `${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}/poll?timeout=${timeout}`;
-            const resp = await fetch(url, { signal });
+            const resp = await vaultFetch(url, { signal });
             if (!resp.ok) {
               return {
                 content: [
@@ -1038,7 +1039,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
             const offset = typeof params.offset === "number" ? params.offset : 0;
             const limit = typeof params.limit === "number" ? params.limit : 200;
             const url = `${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}/log?offset=${offset}&limit=${limit}`;
-            const resp = await fetch(url, { signal });
+            const resp = await vaultFetch(url, { signal });
             if (!resp.ok) {
               return {
                 content: [
@@ -1074,7 +1075,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
             if (params.data !== undefined) writePayload.data = String(params.data);
             if (params.eof === true) writePayload.eof = true;
 
-            const resp = await fetch(
+            const resp = await vaultFetch(
               `${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}/write`,
               {
                 method: "POST",
@@ -1110,7 +1111,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
                 ],
               };
             }
-            const resp = await fetch(
+            const resp = await vaultFetch(
               `${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}/kill`,
               {
                 method: "POST",
@@ -1152,10 +1153,13 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
                 ],
               };
             }
-            const resp = await fetch(`${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}`, {
-              method: "DELETE",
-              signal,
-            });
+            const resp = await vaultFetch(
+              `${baseUrl}/exec/sessions/${encodeURIComponent(sessionId)}`,
+              {
+                method: "DELETE",
+                signal,
+              },
+            );
             if (!resp.ok) {
               return {
                 content: [
@@ -1221,7 +1225,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/query`, {
+        const resp = await vaultFetch(`${baseUrl}/query`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1283,7 +1287,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
 
       try {
         const url = `${baseUrl}/raw/_memory/${encodeURIComponent(path)}`;
-        const resp = await fetch(url, { signal });
+        const resp = await vaultFetch(url, { signal });
 
         if (!resp.ok) {
           const errText = await resp.text();
@@ -1342,13 +1346,13 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         let resp: Response;
 
         if (append) {
-          resp = await fetch(`${baseUrl}/raw/_memory/${encodedPath}/append`, {
+          resp = await vaultFetch(`${baseUrl}/raw/_memory/${encodedPath}/append`, {
             method: "POST",
             body: content,
             signal,
           });
         } else {
-          resp = await fetch(`${baseUrl}/raw/_memory/${encodedPath}`, {
+          resp = await vaultFetch(`${baseUrl}/raw/_memory/${encodedPath}`, {
             method: "PUT",
             body: content,
             signal,
@@ -1365,7 +1369,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         }
 
         // Fire-and-forget: trigger embedding for the new/updated memory
-        fetch(`${baseUrl}/embed`, {
+        vaultFetch(`${baseUrl}/embed`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",
@@ -1419,7 +1423,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         const encodedPath = encodeURIComponent(path);
         if (encoding === "base64") {
           // Write binary artifacts through the raw endpoint; the vault stores them as binary blobs.
-          const resp = await fetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+          const resp = await vaultFetch(`${baseUrl}/raw/editable/${encodedPath}`, {
             method: "PUT",
             headers: {
               "Content-Type": "application/octet-stream",
@@ -1447,7 +1451,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         }
 
         // Text content — write directly through raw endpoint
-        const resp = await fetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+        const resp = await vaultFetch(`${baseUrl}/raw/editable/${encodedPath}`, {
           method: "PUT",
           body: content,
           signal,
@@ -1494,7 +1498,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         const url = prefix
           ? `${baseUrl}/artifacts?prefix=${encodeURIComponent(prefix)}`
           : `${baseUrl}/artifacts`;
-        const resp = await fetch(url, { signal });
+        const resp = await vaultFetch(url, { signal });
 
         if (!resp.ok) {
           const errText = await resp.text();
@@ -1568,7 +1572,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/artifacts/build`, {
+        const resp = await vaultFetch(`${baseUrl}/artifacts/build`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name }),
@@ -1655,7 +1659,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/reports/build`, {
+        const resp = await vaultFetch(`${baseUrl}/reports/build`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name }),
@@ -1731,7 +1735,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/artifacts/url`, {
+        const resp = await vaultFetch(`${baseUrl}/artifacts/url`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ path }),
@@ -1807,7 +1811,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       if (params.threadId) payload.threadId = String(params.threadId);
 
       try {
-        const resp = await fetch(`${baseUrl}/connections/gmail/drafts`, {
+        const resp = await vaultFetch(`${baseUrl}/connections/gmail/drafts`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -1883,7 +1887,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       if (params.threadId) payload.threadId = String(params.threadId);
 
       try {
-        const resp = await fetch(
+        const resp = await vaultFetch(
           `${baseUrl}/connections/gmail/drafts/${encodeURIComponent(draftId)}`,
           {
             method: "PUT",
@@ -1966,7 +1970,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       if (Array.isArray(params.attendees)) payload.attendees = params.attendees;
 
       try {
-        const resp = await fetch(`${baseUrl}/connections/gcalendar/events`, {
+        const resp = await vaultFetch(`${baseUrl}/connections/gcalendar/events`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -2040,7 +2044,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       if (Array.isArray(params.attendees)) payload.attendees = params.attendees;
 
       try {
-        const resp = await fetch(
+        const resp = await vaultFetch(
           `${baseUrl}/connections/gcalendar/events/${encodeURIComponent(eventId)}`,
           {
             method: "PUT",
@@ -2105,7 +2109,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       const calendarId = String(params.calendarId || "primary");
 
       try {
-        const resp = await fetch(
+        const resp = await vaultFetch(
           `${baseUrl}/connections/gcalendar/events/${encodeURIComponent(eventId)}?calendarId=${encodeURIComponent(calendarId)}`,
           {
             method: "DELETE",
@@ -2157,7 +2161,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/connections/web-search/duckduckgo`, {
+        const resp = await vaultFetch(`${baseUrl}/connections/web-search/duckduckgo`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -2249,7 +2253,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       }
 
       try {
-        const resp = await fetch(`${baseUrl}/connections/web-fetch`, {
+        const resp = await vaultFetch(`${baseUrl}/connections/web-fetch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -2353,7 +2357,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       const capability = String(params.capability || "navigate");
 
       try {
-        const resp = await fetch(`${baseUrl}/connections/approve-domain`, {
+        const resp = await vaultFetch(`${baseUrl}/connections/approve-domain`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ domain, decision, scope, capability }),
@@ -2413,7 +2417,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     content: Array<{ type: "text" | "image"; text?: string; data?: string; mimeType?: string }>;
   }> {
     try {
-      const resp = await fetch(`${baseUrl}/connections/browser/tool`, {
+      const resp = await vaultFetch(`${baseUrl}/connections/browser/tool`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: toolName, arguments: args }),
@@ -2441,7 +2445,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     signal?: AbortSignal,
   ): Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }> {
     try {
-      const resp = await fetch(`${baseUrl}${path}`, {
+      const resp = await vaultFetch(`${baseUrl}${path}`, {
         method,
         headers: body ? { "Content-Type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,

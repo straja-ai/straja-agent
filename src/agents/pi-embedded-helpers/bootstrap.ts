@@ -2,6 +2,7 @@ import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { OpenClawConfig } from "../../config/config.js";
 import { truncateUtf16Safe } from "../../utils.js";
+import { withVaultAuthRequestInit } from "../../vault-auth.js";
 import type { WorkspaceBootstrapFile } from "../workspace.js";
 import type { EmbeddedContextFile } from "./types.js";
 
@@ -189,10 +190,13 @@ export async function ensureSessionHeader(params: {
   if (vaultBaseUrl) {
     const key = sessionFileToVaultKey(params.sessionFile);
     const url = `${vaultBaseUrl}/raw/${VAULT_SESSION_COLLECTION}/${encodeURIComponent(key)}`;
-    const existing = await fetch(url, {
-      method: "GET",
-      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
-    });
+    const existing = await fetch(
+      url,
+      withVaultAuthRequestInit({
+        method: "GET",
+        signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+      }),
+    );
     if (existing.status === 200) {
       return;
     }
@@ -207,12 +211,15 @@ export async function ensureSessionHeader(params: {
       timestamp: new Date().toISOString(),
       cwd: params.cwd,
     };
-    const writeResp = await fetch(url, {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: `${JSON.stringify(entry)}\n`,
-      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
-    });
+    const writeResp = await fetch(
+      url,
+      withVaultAuthRequestInit({
+        method: "PUT",
+        headers: { "Content-Type": "text/plain" },
+        body: `${JSON.stringify(entry)}\n`,
+        signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+      }),
+    );
     if (!writeResp.ok) {
       throw new Error(`vault session header write failed (${writeResp.status})`);
     }

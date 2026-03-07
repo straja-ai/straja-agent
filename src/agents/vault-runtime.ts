@@ -1,3 +1,5 @@
+import { withVaultAuthRequestInit } from "../vault-auth.js";
+
 const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
 const SESSION_STORE_PATCH_KEY = Symbol.for("openclaw.sessionStorePatchCallback");
 const SUBAGENT_REGISTRY_PATCH_KEY = Symbol.for("openclaw.subagentRegistryPatchCallback");
@@ -55,10 +57,13 @@ export async function assertVaultRuntimeReady(context: string): Promise<string> 
   const probeUrl = `${baseUrl}/raw/${VAULT_PROBE_COLLECTION}/${encodeURIComponent(VAULT_PROBE_KEY)}`;
   let response: Response;
   try {
-    response = await fetch(probeUrl, {
-      method: "GET",
-      signal: AbortSignal.timeout(VAULT_PROBE_TIMEOUT_MS),
-    });
+    response = await fetch(
+      probeUrl,
+      withVaultAuthRequestInit({
+        method: "GET",
+        signal: AbortSignal.timeout(VAULT_PROBE_TIMEOUT_MS),
+      }),
+    );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`[vault] ${context}: vault is unreachable at ${baseUrl}: ${msg}`, {

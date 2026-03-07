@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { appendVaultAuthCurlArgs, formatVaultCurlError } from "./http.js";
 
 const COLLECTION = "_sessions_store";
 const TIMEOUT_MS = 5_000;
@@ -24,7 +25,7 @@ function storePathToVaultKey(storePath: string): string {
 }
 
 function syncHttpGet(url: string): { status: number; body: string } {
-  const args = ["-s", "-w", "\n%{http_code}", "-X", "GET", url];
+  const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
   try {
     const result = execFileSync("curl", args, {
       encoding: "utf-8",
@@ -35,7 +36,7 @@ function syncHttpGet(url: string): { status: number; body: string } {
     const statusLine = lines.pop() || "0";
     return { status: parseInt(statusLine, 10), body: lines.join("\n") };
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault session-store GET failed: ${msg}`);
   }
 }
@@ -44,7 +45,7 @@ function syncHttpPut(url: string, body: string): void {
   try {
     const statusRaw = execFileSync(
       "curl",
-      [
+      appendVaultAuthCurlArgs([
         "-s",
         "-w",
         "\n%{http_code}",
@@ -55,7 +56,7 @@ function syncHttpPut(url: string, body: string): void {
         "--data-binary",
         "@-",
         url,
-      ],
+      ]),
       {
         input: body,
         encoding: "utf-8",
@@ -69,7 +70,7 @@ function syncHttpPut(url: string, body: string): void {
       throw new Error(`HTTP ${status}`);
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault session-store PUT failed: ${msg}`);
   }
 }

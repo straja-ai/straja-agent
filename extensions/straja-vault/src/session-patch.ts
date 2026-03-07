@@ -35,8 +35,11 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { appendVaultAuthCurlArgs, formatVaultCurlError } from "./http.js";
 
 const COLLECTION = "_sessions";
+const SESSION_WRITE_WARNING_INTERVAL_MS = 30_000;
+let lastSessionWriteWarningAt = 0;
 
 /** Well-known Symbol used to pass the patch callback from plugin -> bundle. */
 export const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
@@ -68,7 +71,7 @@ function sessionPathToVaultKey(sessionFile: string): string {
  * Writes use syncHttpWrite() instead to avoid blocking the event loop.
  */
 function syncHttpGet(url: string): { status: number; body: string } {
-  const args = ["-s", "-w", "\n%{http_code}", "-X", "GET", url];
+  const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
 
   try {
     const result = execFileSync("curl", args, {
@@ -82,7 +85,7 @@ function syncHttpGet(url: string): { status: number; body: string } {
     const responseBody = lines.join("\n");
     return { status: parseInt(statusLine, 10), body: responseBody };
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault HTTP GET ${url} failed: ${msg}`);
   }
 }
@@ -102,7 +105,7 @@ function syncHttpWrite(method: string, url: string, body: string): void {
   try {
     const statusRaw = execFileSync(
       "curl",
-      [
+      appendVaultAuthCurlArgs([
         "-s",
         "-w",
         "\n%{http_code}",
@@ -113,11 +116,11 @@ function syncHttpWrite(method: string, url: string, body: string): void {
         "--data-binary",
         "@-",
         url,
-      ],
+      ]),
       {
         input: body,
         encoding: "utf-8",
-        timeout: 5_000,
+        timeout: 12_000,
         maxBuffer: 1024,
         stdio: ["pipe", "pipe", "pipe"],
       },
@@ -127,9 +130,35 @@ function syncHttpWrite(method: string, url: string, body: string): void {
       throw new Error(`HTTP ${status}`);
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault HTTP ${method} ${url} failed: ${msg}`);
   }
+}
+
+export function isTransientSessionWriteError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return [
+    "ETIMEDOUT",
+    "HTTP 503",
+    "Database busy, retry request",
+    "database is locked",
+    "SQLITE_BUSY",
+    "ECONNRESET",
+    "aborted",
+  ].some((pattern) => msg.includes(pattern));
+}
+
+function deferVaultSessionWrite(sessionManager: any, err: unknown): boolean {
+  if (!isTransientSessionWriteError(err)) return false;
+  sessionManager._vaultFlushed = false;
+  sessionManager.flushed = false;
+  const now = Date.now();
+  if (now - lastSessionWriteWarningAt >= SESSION_WRITE_WARNING_INTERVAL_MS) {
+    lastSessionWriteWarningAt = now;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[straja-vault] Deferred session persistence after transient vault error: ${msg}`);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,15 +231,20 @@ function applyPatch(
 
     const key = sessionPathToVaultKey(this.sessionFile);
 
-    if (!this._vaultFlushed) {
-      // Full flush: PUT all entries as the complete document
-      const content = this.fileEntries.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
-      syncHttpWrite("PUT", rawUrl(key), content);
-      this._vaultFlushed = true;
-      this.flushed = true;
-    } else {
-      // Incremental: append just this entry
-      syncHttpWrite("POST", rawUrl(key) + "/append", JSON.stringify(entry));
+    try {
+      if (!this._vaultFlushed) {
+        // Full flush: PUT all entries as the complete document
+        const content = this.fileEntries.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
+        syncHttpWrite("PUT", rawUrl(key), content);
+        this._vaultFlushed = true;
+        this.flushed = true;
+      } else {
+        // Incremental: append just this entry
+        syncHttpWrite("POST", rawUrl(key) + "/append", JSON.stringify(entry));
+      }
+    } catch (err: unknown) {
+      if (deferVaultSessionWrite(this, err)) return;
+      throw err;
     }
   };
 
@@ -220,7 +254,14 @@ function applyPatch(
     if (!this.persist || !this.sessionFile) return;
     const key = sessionPathToVaultKey(this.sessionFile);
     const content = this.fileEntries.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
-    syncHttpWrite("PUT", rawUrl(key), content);
+    try {
+      syncHttpWrite("PUT", rawUrl(key), content);
+      this._vaultFlushed = true;
+      this.flushed = true;
+    } catch (err: unknown) {
+      if (deferVaultSessionWrite(this, err)) return;
+      throw err;
+    }
   };
 
   // -- Override setSessionFile(path) ----------------------------------------
@@ -263,7 +304,13 @@ function applyPatch(
       // Mirror the branched state to vault
       const key = sessionPathToVaultKey(this.sessionFile);
       const content = this.fileEntries.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
-      syncHttpWrite("PUT", rawUrl(key), content);
+      try {
+        syncHttpWrite("PUT", rawUrl(key), content);
+        this._vaultFlushed = true;
+        this.flushed = true;
+      } catch (err: unknown) {
+        if (!deferVaultSessionWrite(this, err)) throw err;
+      }
     }
     return result;
   };

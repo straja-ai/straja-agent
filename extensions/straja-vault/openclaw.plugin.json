@@ -9,6 +9,9 @@
         "type": "string",
         "default": "http://localhost:8181"
       },
+      "authToken": {
+        "type": "string"
+      },
       "injectMemoryInPrompt": {
         "type": "boolean",
         "default": false
@@ -24,6 +27,10 @@
       "label": "Vault URL",
       "help": "Base URL of the Straja Vault HTTP daemon",
       "placeholder": "http://localhost:8181"
+    },
+    "authToken": {
+      "label": "Vault Auth Token",
+      "help": "Bearer token used when the vault requires paired-agent authorization. You can also provide it via STRAJA_VAULT_TOKEN."
     },
     "injectMemoryInPrompt": {
       "label": "Inject Memory in Prompt",

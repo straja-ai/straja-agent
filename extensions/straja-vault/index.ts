@@ -8,6 +8,12 @@ import { registerCronStorePatch } from "./src/cron-store-patch.js";
 import { registerDeliveryQueuePatch } from "./src/delivery-queue-patch.js";
 import { registerFsToolsPatch } from "./src/fs-tools-patch.js";
 import { registerGatewayWorkspacePatch } from "./src/gateway-workspace-patch.js";
+import {
+  appendVaultProbeCurlArgs,
+  formatVaultCurlError,
+  registerVaultAuthToken,
+  vaultFetch,
+} from "./src/http.js";
 import { registerLogsPatch } from "./src/logs-patch.js";
 import { registerSessionPatch } from "./src/session-patch.js";
 import { registerSessionStorePatch } from "./src/session-store-patch.js";
@@ -39,18 +45,22 @@ function assertVaultReachable(baseUrl: string): void {
   }
   const probeUrl = `${baseUrl}/raw/_workspace/${encodeURIComponent("__vault_required_probe__")}`;
   try {
-    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", probeUrl], {
-      encoding: "utf-8",
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-    });
+    const result = execFileSync(
+      "curl",
+      appendVaultProbeCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", probeUrl]),
+      {
+        encoding: "utf-8",
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+      },
+    );
     const statusRaw = result.trimEnd().split("\n").pop() || "0";
     const status = Number.parseInt(statusRaw, 10);
     if (!Number.isFinite(status) || status <= 0 || status >= 500) {
       throw new Error(`HTTP ${status}`);
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault is required but unreachable at ${baseUrl}: ${msg}`);
   }
 }
@@ -92,7 +102,7 @@ async function fetchMemoryContent(baseUrl: string): Promise<string | null> {
   }
 
   try {
-    const resp = await fetch(`${baseUrl}/raw/_memory/${encodeURIComponent("MEMORY.md")}`, {
+    const resp = await vaultFetch(`${baseUrl}/raw/_memory/${encodeURIComponent("MEMORY.md")}`, {
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
@@ -183,6 +193,12 @@ const plugin = {
           type: "string",
           description: "Vault HTTP API base URL. Default: http://localhost:8181",
         },
+        authToken: {
+          type: "string",
+          description:
+            "Bearer token used when the vault requires paired-agent authorization. " +
+            "Can also be set via STRAJA_VAULT_TOKEN.",
+        },
         debugLogPrompt: {
           type: "boolean",
           description:
@@ -195,6 +211,9 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     const baseUrl = normalizeVaultBaseUrl(
       ((api.pluginConfig?.baseUrl as string) || process.env.STRAJA_VAULT_URL) ?? undefined,
+    );
+    registerVaultAuthToken(
+      ((api.pluginConfig?.authToken as string) || process.env.STRAJA_VAULT_TOKEN) ?? undefined,
     );
     assertVaultReachable(baseUrl);
 
@@ -337,7 +356,7 @@ const plugin = {
             let sessionContent: string | null = null;
 
             try {
-              const resp = await fetch(
+              const resp = await vaultFetch(
                 `${baseUrl}/raw/_sessions/${encodeURIComponent(vaultSessionPath)}`,
               );
               if (resp.ok) {
@@ -396,7 +415,7 @@ const plugin = {
 
             // Write to vault _memory collection (append to daily file)
             const memoryPath = `memory/${dateStr}.md`;
-            const writeResp = await fetch(
+            const writeResp = await vaultFetch(
               `${baseUrl}/raw/_memory/${encodeURIComponent(memoryPath)}/append`,
               { method: "POST", body: entry },
             );
@@ -405,7 +424,7 @@ const plugin = {
               api.logger.info(`Session memory saved to _memory/${memoryPath}`);
 
               // Fire-and-forget: trigger embedding
-              fetch(`${baseUrl}/embed`, {
+              vaultFetch(`${baseUrl}/embed`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: "{}",
@@ -490,7 +509,7 @@ const plugin = {
           historyMessages: event.historyMessages,
           imagesCount: event.imagesCount,
         };
-        fetch(`${baseUrl}/raw/_workspace/_debug/last-prompt.json`, {
+        vaultFetch(`${baseUrl}/raw/_workspace/_debug/last-prompt.json`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload, null, 2),

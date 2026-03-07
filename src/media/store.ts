@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { SafeOpenError, readLocalFileSafely } from "../infra/fs-safe.js";
 import { resolvePinnedHostname } from "../infra/net/ssrf.js";
 import { resolveConfigDir } from "../utils.js";
+import { getVaultAuthToken } from "../vault-auth.js";
 import { detectMime, extensionForMime } from "./mime.js";
 
 const resolveMediaDir = () => path.join(resolveConfigDir(), "media");
@@ -310,6 +311,10 @@ export async function saveMediaToVault(
   const headers: Record<string, string> = {
     "Content-Type": contentType || "application/octet-stream",
   };
+  const vaultAuthToken = getVaultAuthToken();
+  if (vaultAuthToken) {
+    headers.Authorization = `Bearer ${vaultAuthToken}`;
+  }
   if (originalFilename) {
     headers["X-Original-Name"] = originalFilename;
   }

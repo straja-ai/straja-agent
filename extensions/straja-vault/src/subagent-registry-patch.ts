@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { appendVaultAuthCurlArgs, formatVaultCurlError } from "./http.js";
 
 const COLLECTION = "_subagents";
 const REGISTRY_KEY = "runs.json";
@@ -13,7 +14,7 @@ export type SubagentRegistryPatchOps = {
 };
 
 function syncHttpGet(url: string): { status: number; body: string } {
-  const args = ["-s", "-w", "\n%{http_code}", "-X", "GET", url];
+  const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
   try {
     const result = execFileSync("curl", args, {
       encoding: "utf-8",
@@ -24,7 +25,7 @@ function syncHttpGet(url: string): { status: number; body: string } {
     const statusLine = lines.pop() || "0";
     return { status: parseInt(statusLine, 10), body: lines.join("\n") };
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault subagent-registry GET failed: ${msg}`);
   }
 }
@@ -33,7 +34,7 @@ function syncHttpPut(url: string, body: string): void {
   try {
     const statusRaw = execFileSync(
       "curl",
-      [
+      appendVaultAuthCurlArgs([
         "-s",
         "-w",
         "\n%{http_code}",
@@ -44,7 +45,7 @@ function syncHttpPut(url: string, body: string): void {
         "--data-binary",
         "@-",
         url,
-      ],
+      ]),
       {
         input: body,
         encoding: "utf-8",
@@ -58,7 +59,7 @@ function syncHttpPut(url: string, body: string): void {
       throw new Error(`HTTP ${status}`);
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault subagent-registry PUT failed: ${msg}`);
   }
 }

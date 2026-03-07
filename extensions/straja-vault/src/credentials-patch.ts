@@ -17,6 +17,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { appendVaultAuthCurlArgs, formatVaultCurlError, vaultFetch } from "./http.js";
 
 const COLLECTION = "_credentials";
 const TIMEOUT_MS = 5_000;
@@ -65,7 +66,7 @@ function extractKeyFromPath(filePath: string): string {
 // ---------------------------------------------------------------------------
 
 function syncHttpGet(url: string): { status: number; body: string } {
-  const args = ["-s", "-w", "\n%{http_code}", "-X", "GET", url];
+  const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
   try {
     const result = execFileSync("curl", args, {
       encoding: "utf-8",
@@ -76,7 +77,7 @@ function syncHttpGet(url: string): { status: number; body: string } {
     const statusLine = lines.pop() || "0";
     return { status: parseInt(statusLine, 10), body: lines.join("\n") };
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatVaultCurlError(err);
     throw new Error(`Vault credentials GET failed: ${msg}`);
   }
 }
@@ -93,7 +94,7 @@ function createVaultCredentialsOps(baseUrl: string): CredentialsPatchOps {
     const key = extractKeyFromPath(filePath);
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
@@ -123,7 +124,7 @@ function createVaultCredentialsOps(baseUrl: string): CredentialsPatchOps {
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
     const json = JSON.stringify(value, null, 2);
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: json,
@@ -158,7 +159,7 @@ function createVaultCredentialsOps(baseUrl: string): CredentialsPatchOps {
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
 
     try {
-      const resp = await fetch(url, {
+      const resp = await vaultFetch(url, {
         method: "HEAD",
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });

@@ -12,6 +12,8 @@
  * and use `fetch()` to talk to the vault over localhost.
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_workspace";
 
 // ---------------------------------------------------------------------------
@@ -83,7 +85,7 @@ export function createVaultReadOperations(
   return {
     async readFile(absolutePath: string): Promise<Buffer> {
       const key = toVaultKey(absolutePath, workspaceRoot);
-      const resp = await fetch(rawUrl(baseUrl, key));
+      const resp = await vaultFetch(rawUrl(baseUrl, key));
       if (!resp.ok) {
         throw new Error(`ENOENT: no such file or directory, open '${absolutePath}'`);
       }
@@ -93,7 +95,7 @@ export function createVaultReadOperations(
 
     async access(absolutePath: string): Promise<void> {
       const key = toVaultKey(absolutePath, workspaceRoot);
-      const resp = await fetch(rawUrl(baseUrl, key), { method: "GET" });
+      const resp = await vaultFetch(rawUrl(baseUrl, key), { method: "GET" });
       if (!resp.ok) {
         throw new Error(`ENOENT: no such file or directory, access '${absolutePath}'`);
       }
@@ -124,7 +126,7 @@ export function createVaultWriteOperations(
   return {
     async writeFile(absolutePath: string, content: string): Promise<void> {
       const key = toVaultKey(absolutePath, workspaceRoot);
-      const resp = await fetch(rawUrl(baseUrl, key), {
+      const resp = await vaultFetch(rawUrl(baseUrl, key), {
         method: "PUT",
         headers: { "Content-Type": "text/plain" },
         body: content,
@@ -143,7 +145,7 @@ export function createVaultWriteOperations(
 
     async deleteFile(absolutePath: string): Promise<void> {
       const key = toVaultKey(absolutePath, workspaceRoot);
-      const resp = await fetch(rawUrl(baseUrl, key), { method: "DELETE" });
+      const resp = await vaultFetch(rawUrl(baseUrl, key), { method: "DELETE" });
       if (!resp.ok) {
         const errText = await resp.text();
         throw new Error(`ENOENT: no such file or directory, unlink '${absolutePath}'`);

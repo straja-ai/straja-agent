@@ -17,6 +17,8 @@
  * No disk fallback — if the vault is unreachable, operations throw.
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_delivery_queue";
 const TIMEOUT_MS = 5_000;
 
@@ -41,7 +43,7 @@ function createVaultDeliveryQueueOps(baseUrl: string): DeliveryQueuePatchOps {
     const docKey = `${key}.json`;
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(docKey)}`;
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
@@ -77,7 +79,7 @@ function createVaultDeliveryQueueOps(baseUrl: string): DeliveryQueuePatchOps {
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(docKey)}`;
     const json = JSON.stringify(entries, null, 2);
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: json,

@@ -2,6 +2,7 @@ import path from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { ensureVaultSessionManagerPatched } from "../../sessions/vault-session-manager.js";
+import { withVaultAuthRequestInit } from "../../vault-auth.js";
 import { resolveDefaultSessionStorePath, resolveSessionFilePath } from "./paths.js";
 import { loadSessionStore, updateSessionStore } from "./store.js";
 import type { SessionEntry } from "./types.js";
@@ -86,10 +87,13 @@ async function ensureSessionHeader(params: {
   if (vaultBaseUrl) {
     const key = sessionFileToVaultKey(params.sessionFile);
     const url = `${vaultBaseUrl}/raw/${VAULT_SESSION_COLLECTION}/${encodeURIComponent(key)}`;
-    const existing = await fetch(url, {
-      method: "GET",
-      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
-    });
+    const existing = await fetch(
+      url,
+      withVaultAuthRequestInit({
+        method: "GET",
+        signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+      }),
+    );
     if (existing.status === 200) {
       return;
     }
@@ -103,12 +107,15 @@ async function ensureSessionHeader(params: {
       timestamp: new Date().toISOString(),
       cwd: process.cwd(),
     };
-    const writeResp = await fetch(url, {
-      method: "PUT",
-      headers: { "Content-Type": "text/plain" },
-      body: `${JSON.stringify(header)}\n`,
-      signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
-    });
+    const writeResp = await fetch(
+      url,
+      withVaultAuthRequestInit({
+        method: "PUT",
+        headers: { "Content-Type": "text/plain" },
+        body: `${JSON.stringify(header)}\n`,
+        signal: AbortSignal.timeout(VAULT_TIMEOUT_MS),
+      }),
+    );
     if (!writeResp.ok) {
       throw new Error(`vault session header write failed (${writeResp.status})`);
     }

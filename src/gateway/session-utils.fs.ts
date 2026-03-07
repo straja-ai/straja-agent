@@ -9,6 +9,7 @@ import {
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
 import { hasInterSessionUserProvenance } from "../sessions/input-provenance.js";
 import { extractToolCallNames, hasToolCall } from "../utils/transcript-tools.js";
+import { appendVaultAuthCurlArgs } from "../vault-auth.js";
 import { stripEnvelope } from "./chat-sanitize.js";
 import type { SessionPreviewItem } from "./session-utils.types.js";
 
@@ -75,11 +76,15 @@ function pathToVaultKey(filePath: string): string {
 function vaultGet(baseUrl: string, key: string): string | null {
   const url = `${baseUrl}/raw/${VAULT_COLLECTION}/${encodeURIComponent(key)}`;
   try {
-    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", url], {
-      encoding: "utf-8",
-      timeout: 5_000,
-      maxBuffer: 50 * 1024 * 1024,
-    });
+    const result = execFileSync(
+      "curl",
+      appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]),
+      {
+        encoding: "utf-8",
+        timeout: 5_000,
+        maxBuffer: 50 * 1024 * 1024,
+      },
+    );
     const lines = result.trimEnd().split("\n");
     const statusLine = lines.pop() || "0";
     const status = parseInt(statusLine, 10);
@@ -114,7 +119,7 @@ export function vaultWriteSessionContent(candidates: string[], content: string):
   try {
     const statusRaw = execFileSync(
       "curl",
-      [
+      appendVaultAuthCurlArgs([
         "-s",
         "-w",
         "\n%{http_code}",
@@ -125,7 +130,7 @@ export function vaultWriteSessionContent(candidates: string[], content: string):
         "--data-binary",
         "@-",
         url,
-      ],
+      ]),
       {
         input: content,
         encoding: "utf-8",

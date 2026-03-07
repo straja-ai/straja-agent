@@ -11,6 +11,8 @@
  * All operations are async (fetch) and best-effort (consumers catch errors).
  */
 
+import { vaultFetch } from "./http.js";
+
 const TIMEOUT_MS = 5_000;
 
 /** Well-known Symbol used to pass vault audit ops from plugin → bundle. */
@@ -33,7 +35,7 @@ function createVaultAuditOps(baseUrl: string): AuditPatchOps {
   async function appendEntry(category: string, entry: Record<string, unknown>): Promise<void> {
     const url = `${baseUrl}/audit/append`;
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ category, entry }),

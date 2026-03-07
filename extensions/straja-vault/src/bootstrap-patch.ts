@@ -11,6 +11,8 @@
  * No disk fallback — if the vault is unreachable, the fetch throws.
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_workspace";
 
 /** Well-known Symbol used to pass the bootstrap loader from plugin → bundle. */
@@ -54,7 +56,7 @@ async function fetchBootstrapFile(baseUrl: string, filename: string): Promise<st
   }
 
   const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
-  const resp = await fetch(url, {
+  const resp = await vaultFetch(url, {
     signal: AbortSignal.timeout(3000),
   });
 

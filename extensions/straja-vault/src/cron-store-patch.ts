@@ -15,6 +15,8 @@
  * No disk fallback — if the vault is unreachable, operations throw.
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_cron";
 
 /** Well-known Symbol used to pass vault cron store ops from plugin → bundle. */
@@ -166,7 +168,7 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
   const writesByKey = new Map<string, Promise<void>>();
 
   async function loadCronStore(_storePath: string): Promise<CronStoreFile> {
-    const resp = await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(storeKey)}`, {
+    const resp = await vaultFetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(storeKey)}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
@@ -200,7 +202,7 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
 
   async function saveCronStore(_storePath: string, store: CronStoreFile): Promise<void> {
     const json = JSON.stringify(store, null, 2);
-    const resp = await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(storeKey)}`, {
+    const resp = await vaultFetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(storeKey)}`, {
       method: "PUT",
       headers: { "Content-Type": "text/plain" },
       body: json,
@@ -220,7 +222,7 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
     const keepLines = opts?.keepLines ?? 2_000;
 
     // Read current content to check size
-    const resp = await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
+    const resp = await vaultFetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 
@@ -238,7 +240,7 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
     const trimmed = kept.join("\n") + "\n";
 
     // Overwrite with pruned content
-    await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
+    await vaultFetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
       method: "PUT",
       headers: { "Content-Type": "text/plain" },
       body: trimmed,
@@ -260,11 +262,14 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
     const next = prev
       .catch(() => undefined)
       .then(async () => {
-        const resp = await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}/append`, {
-          method: "POST",
-          body: line,
-          signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
+        const resp = await vaultFetch(
+          `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}/append`,
+          {
+            method: "POST",
+            body: line,
+            signal: AbortSignal.timeout(TIMEOUT_MS),
+          },
+        );
 
         if (!resp.ok) {
           throw new Error(`Vault cron run log append failed: ${resp.status} ${resp.statusText}`);
@@ -285,7 +290,7 @@ function createVaultCronStoreOps(baseUrl: string): CronStorePatchOps {
     const jobId = extractJobIdFromPath(filePath);
     const key = `runs/${jobId}.jsonl`;
 
-    const resp = await fetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
+    const resp = await vaultFetch(`${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`, {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
 

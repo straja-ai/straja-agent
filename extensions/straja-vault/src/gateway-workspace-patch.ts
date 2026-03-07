@@ -10,6 +10,8 @@
  * No disk fallback — if the vault is unreachable, operations throw.
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_workspace";
 
 /** Well-known Symbol used to pass the workspace file ops from plugin → gateway. */
@@ -34,7 +36,7 @@ export interface GatewayWorkspaceOps {
  */
 async function vaultStatFile(baseUrl: string, filename: string): Promise<VaultFileMeta | null> {
   const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
-  const resp = await fetch(url, {
+  const resp = await vaultFetch(url, {
     signal: AbortSignal.timeout(3000),
   });
 
@@ -60,7 +62,7 @@ async function vaultStatFile(baseUrl: string, filename: string): Promise<VaultFi
  */
 async function vaultReadFile(baseUrl: string, filename: string): Promise<string | null> {
   const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
-  const resp = await fetch(url, {
+  const resp = await vaultFetch(url, {
     signal: AbortSignal.timeout(3000),
   });
 
@@ -82,7 +84,7 @@ async function vaultReadFile(baseUrl: string, filename: string): Promise<string 
  */
 async function vaultWriteFile(baseUrl: string, filename: string, content: string): Promise<void> {
   const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
-  const resp = await fetch(url, {
+  const resp = await vaultFetch(url, {
     method: "PUT",
     headers: { "Content-Type": "text/plain" },
     body: content,

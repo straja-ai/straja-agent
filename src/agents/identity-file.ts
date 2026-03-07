@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { appendVaultAuthCurlArgs } from "../vault-auth.js";
 import { DEFAULT_IDENTITY_FILENAME } from "./workspace.js";
 
 export type AgentIdentityFile = {
@@ -118,11 +119,15 @@ function syncVaultRead(filename: string): string | null {
   const url = `${baseUrl}/raw/_workspace/${encodeURIComponent(filename)}`;
 
   try {
-    const result = execFileSync("curl", ["-s", "-w", "\n%{http_code}", "-X", "GET", url], {
-      encoding: "utf-8",
-      timeout: 5_000,
-      maxBuffer: 5 * 1024 * 1024,
-    });
+    const result = execFileSync(
+      "curl",
+      appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]),
+      {
+        encoding: "utf-8",
+        timeout: 5_000,
+        maxBuffer: 5 * 1024 * 1024,
+      },
+    );
 
     const lines = result.trimEnd().split("\n");
     const statusLine = lines.pop() || "0";

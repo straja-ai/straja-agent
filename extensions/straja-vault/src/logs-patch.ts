@@ -17,6 +17,8 @@
  * (but consumers catch).
  */
 
+import { vaultFetch } from "./http.js";
+
 const COLLECTION = "_logs";
 const TIMEOUT_MS = 5_000;
 
@@ -40,7 +42,7 @@ function createVaultLogsOps(baseUrl: string): LogsPatchOps {
   async function appendLine(logName: string, line: string): Promise<void> {
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(logName)}/append`;
 
-    const resp = await fetch(url, {
+    const resp = await vaultFetch(url, {
       method: "POST",
       body: line,
       signal: AbortSignal.timeout(TIMEOUT_MS),
