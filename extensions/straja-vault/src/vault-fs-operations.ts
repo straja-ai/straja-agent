@@ -5,8 +5,9 @@
  * pi-coding-agent's read, write, and edit tools. Instead of touching the
  * host filesystem, every operation goes through the vault's HTTP API.
  *
- * The vault stores files in the `_workspace` collection, keyed by their
- * path relative to the workspace root (e.g. "src/main.ts").
+ * The vault stores normal workspace files in `_workspace`, keyed by their
+ * path relative to the workspace root (e.g. "src/main.ts"). Memory files
+ * (`MEMORY.md`, `memory.md`, `memory/*.md`) are stored in `_memory`.
  *
  * These operations are async (the tool framework already expects Promises)
  * and use `fetch()` to talk to the vault over localhost.
@@ -14,7 +15,8 @@
 
 import { vaultFetch } from "./http.js";
 
-const COLLECTION = "_workspace";
+const WORKSPACE_COLLECTION = "_workspace";
+const MEMORY_COLLECTION = "_memory";
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -42,8 +44,21 @@ function toVaultKey(absolutePath: string, workspaceRoot: string): string {
   return key || absolutePath;
 }
 
+function collectionForKey(key: string): string {
+  const normalized = key.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  const lower = normalized.toLowerCase();
+  if (lower === "memory.md" || lower === "memory/memory.md") {
+    return MEMORY_COLLECTION;
+  }
+  if (normalized === "MEMORY.md" || lower.startsWith("memory/")) {
+    return MEMORY_COLLECTION;
+  }
+  return WORKSPACE_COLLECTION;
+}
+
 function rawUrl(baseUrl: string, key: string): string {
-  return `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
+  const collection = collectionForKey(key);
+  return `${baseUrl}/raw/${collection}/${encodeURIComponent(key)}`;
 }
 
 // ---------------------------------------------------------------------------
