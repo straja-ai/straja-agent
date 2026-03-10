@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { MsgContext } from "../auto-reply/templating.js";
 import type { MediaUnderstandingAttachmentsConfig } from "../config/types.tools.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
+import type { SsrFPolicy } from "../infra/net/ssrf.js";
 import { isAbortError } from "../infra/unhandled-rejections.js";
 import { fetchRemoteMedia, MediaFetchError } from "../media/fetch.js";
 import {
@@ -17,6 +18,21 @@ import { buildRandomTempFilePath } from "../plugin-sdk/temp-path.js";
 import { MediaUnderstandingSkipError } from "./errors.js";
 import { fetchWithTimeout } from "./providers/shared.js";
 import type { MediaAttachment, MediaUnderstandingCapability } from "./types.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+
+function getVaultMediaPrefix(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const raw = g[VAULT_READER_KEY];
+  if (typeof raw === "string" && raw.trim()) {
+    return `${raw.trim().replace(/\/+$/, "")}/media`;
+  }
+  return null;
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
 
 type MediaBufferResult = {
   buffer: Buffer;
@@ -284,7 +300,13 @@ export class MediaAttachmentCache {
       }
     }
 
-    const url = entry.attachment.url?.trim();
+    // Fall back to attachment.path when it's an HTTP URL but .url is not set
+    // (e.g. vault media URLs stored in MediaPaths but not MediaUrls).
+    const url =
+      entry.attachment.url?.trim() ||
+      (entry.attachment.path && isHttpUrl(entry.attachment.path)
+        ? entry.attachment.path
+        : undefined);
     if (!url) {
       throw new MediaUnderstandingSkipError(
         "empty",
@@ -295,7 +317,24 @@ export class MediaAttachmentCache {
     try {
       const fetchImpl = (input: RequestInfo | URL, init?: RequestInit) =>
         fetchWithTimeout(resolveRequestUrl(input), init ?? {}, params.timeoutMs, fetch);
-      const fetched = await fetchRemoteMedia({ url, fetchImpl, maxBytes: params.maxBytes });
+      // Allow fetching from vault media URLs (localhost/127.0.0.1) through SSRF policy.
+      const vaultPrefix = getVaultMediaPrefix();
+      const isVaultUrl = Boolean(vaultPrefix && url.startsWith(vaultPrefix));
+      let ssrfPolicy: SsrFPolicy | undefined;
+      if (isVaultUrl) {
+        try {
+          ssrfPolicy = { allowedHostnames: [new URL(url).hostname] };
+        } catch {
+          // leave undefined — fetchRemoteMedia will use default policy
+        }
+      }
+      const fetched = await fetchRemoteMedia({
+        url,
+        fetchImpl,
+        maxBytes: params.maxBytes,
+        ssrfPolicy,
+        maxRedirects: isVaultUrl ? 0 : undefined,
+      });
       entry.buffer = fetched.buffer;
       entry.bufferMime =
         entry.attachment.mime ??
@@ -413,6 +452,10 @@ export class MediaAttachmentCache {
   private resolveLocalPath(attachment: MediaAttachment): string | undefined {
     const rawPath = normalizeAttachmentPath(attachment.path);
     if (!rawPath) {
+      return undefined;
+    }
+    // HTTP(S) URLs are not local paths — skip to URL fetch path in getBuffer/getPath.
+    if (isHttpUrl(rawPath)) {
       return undefined;
     }
     return path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);

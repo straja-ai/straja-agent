@@ -570,7 +570,10 @@ async function resolveActiveModelEntry(params: {
   return {
     type: "provider",
     provider: providerId,
-    model: params.activeModel?.model,
+    // For audio: the active model is the chat model (e.g. gpt-5.3-codex) which
+    // is NOT a valid Whisper model.  Omit it so runProviderEntry falls back to
+    // DEFAULT_AUDIO_MODELS[providerId] (e.g. gpt-4o-mini-transcribe).
+    model: params.capability === "audio" ? undefined : params.activeModel?.model,
   };
 }
 

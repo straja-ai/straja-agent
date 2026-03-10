@@ -8,9 +8,21 @@ import { minimaxProvider } from "./minimax/index.js";
 import { openaiProvider } from "./openai/index.js";
 import { zaiProvider } from "./zai/index.js";
 
+/**
+ * openai-codex uses the same OpenAI Whisper audio endpoint but authenticates
+ * via OAuth (Codex) tokens instead of a standard API key.  Registering it as
+ * a separate provider lets the auto-resolution chain discover it when the user
+ * only has openai-codex credentials.
+ */
+const openaiCodexProvider: MediaUnderstandingProvider = {
+  ...openaiProvider,
+  id: "openai-codex",
+};
+
 const PROVIDERS: MediaUnderstandingProvider[] = [
   groqProvider,
   openaiProvider,
+  openaiCodexProvider,
   googleProvider,
   anthropicProvider,
   minimaxProvider,

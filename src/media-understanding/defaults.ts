@@ -30,10 +30,17 @@ export const DEFAULT_VIDEO_MAX_BASE64_BYTES = 70 * MB;
 export const DEFAULT_AUDIO_MODELS: Record<string, string> = {
   groq: "whisper-large-v3-turbo",
   openai: "gpt-4o-mini-transcribe",
+  "openai-codex": "gpt-4o-mini-transcribe",
   deepgram: "nova-3",
 };
 
-export const AUTO_AUDIO_KEY_PROVIDERS = ["openai", "groq", "deepgram", "google"] as const;
+export const AUTO_AUDIO_KEY_PROVIDERS = [
+  "openai",
+  "openai-codex",
+  "groq",
+  "deepgram",
+  "google",
+] as const;
 export const AUTO_IMAGE_KEY_PROVIDERS = [
   "openai",
   "anthropic",
