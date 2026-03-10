@@ -139,11 +139,13 @@ export function isTransientSessionWriteError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return [
     "ETIMEDOUT",
+    "request timed out",
     "HTTP 503",
     "Database busy, retry request",
     "database is locked",
     "SQLITE_BUSY",
     "ECONNRESET",
+    "ECONNREFUSED",
     "aborted",
   ].some((pattern) => msg.includes(pattern));
 }

@@ -44,6 +44,9 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "vault_presentation_build",
     "vault_report_build",
     "vault_artifact_url",
+    "vault_agent_collection_create",
+    "vault_agent_collection_write",
+    "vault_agent_collection_list",
   ],
   // Automation + infra
   "group:automation": ["vault_cron", "gateway"],

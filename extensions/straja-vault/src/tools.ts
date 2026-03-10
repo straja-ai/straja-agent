@@ -161,6 +161,49 @@ export const VaultArtifactUrlSchema = Type.Object({
   }),
 });
 
+// ---------------------------------------------------------------------------
+// Agent Collection Schemas
+// ---------------------------------------------------------------------------
+
+export const VaultAgentCollectionCreateSchema = Type.Object({
+  name: Type.String({
+    description:
+      "Name for the new agent collection (e.g. 'john-doe', 'project-alpha'). " +
+      "Will be sanitized to a lowercase slug. Must not start with '_' (reserved for system collections).",
+  }),
+  description: Type.Optional(
+    Type.String({
+      description: "Short description of the collection's purpose.",
+    }),
+  ),
+});
+
+export const VaultAgentCollectionWriteSchema = Type.Object({
+  collection: Type.String({
+    description:
+      "Agent collection name (as returned by vault_agent_collection_create or vault_agent_collection_list).",
+  }),
+  path: Type.String({
+    description: "File path within the collection (e.g. 'notes/2026-03-10.md').",
+  }),
+  content: Type.String({
+    description: "Content to write.",
+  }),
+  title: Type.Optional(
+    Type.String({
+      description: "Human-readable title for the document. Defaults to the path.",
+    }),
+  ),
+  append: Type.Optional(
+    Type.Boolean({
+      description: "If true, append content instead of overwriting. Default: false.",
+      default: false,
+    }),
+  ),
+});
+
+export const VaultAgentCollectionListSchema = Type.Object({});
+
 export const VaultWebSearchDuckDuckGoSchema = Type.Object({
   query: Type.String({
     description: "Web search query to run through the vault's DuckDuckGo search adapter.",
@@ -1381,6 +1424,335 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         const action = append ? "appended to" : "wrote";
         return {
           content: [{ type: "text" as const, text: `Successfully ${action} _memory/${path}` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_agent_collection_create -------------------------------------------
+  const vaultAgentCollectionCreate: AnyAgentTool = {
+    name: "vault_agent_collection_create",
+    label: "Create Agent Collection",
+    description:
+      "Create a new agent-managed collection in the vault (e.g. one per student, project, or topic). " +
+      "The collection is marked with metadata so it's distinguishable from user-created collections. " +
+      "After creation, use vault_agent_collection_write to add content.",
+    parameters: VaultAgentCollectionCreateSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const rawName = String(params.name || "").trim();
+      const description = params.description ? String(params.description).trim() : "";
+
+      if (!rawName) {
+        return { content: [{ type: "text" as const, text: "Error: name is required." }] };
+      }
+
+      // Sanitize to slug
+      const collName = rawName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 100);
+
+      if (!collName) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: name produces an empty slug after sanitization.",
+            },
+          ],
+        };
+      }
+      if (collName.startsWith("_")) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: collection name must not start with '_' (reserved for system collections).",
+            },
+          ],
+        };
+      }
+
+      try {
+        // Check if _meta.json already exists (collection already created)
+        const checkResp = await vaultFetch(
+          `${baseUrl}/raw/${encodeURIComponent(collName)}/${encodeURIComponent("_meta.json")}`,
+          {
+            method: "GET",
+            signal,
+          },
+        );
+        if (checkResp.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: agent collection "${collName}" already exists.`,
+              },
+            ],
+          };
+        }
+
+        // Create _meta.json to mark this as an agent collection
+        const meta = JSON.stringify({
+          source: "agent",
+          description: description || undefined,
+          createdAt: new Date().toISOString(),
+        });
+
+        const resp = await vaultFetch(
+          `${baseUrl}/raw/${encodeURIComponent(collName)}/${encodeURIComponent("_meta.json")}`,
+          {
+            method: "PUT",
+            body: meta,
+            signal,
+          },
+        );
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Collection create error (${resp.status}): ${errText}`,
+              },
+            ],
+          };
+        }
+
+        // Trigger embedding
+        vaultFetch(`${baseUrl}/embed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }).catch(() => {});
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Created agent collection "${collName}"${description ? ` — ${description}` : ""}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_agent_collection_write ------------------------------------------
+  const vaultAgentCollectionWrite: AnyAgentTool = {
+    name: "vault_agent_collection_write",
+    label: "Write to Agent Collection",
+    description:
+      "Write or append content to an agent-managed collection. " +
+      "Only works on collections created with vault_agent_collection_create. " +
+      "Use this to add notes, files, or any content to a student/project/topic collection.",
+    parameters: VaultAgentCollectionWriteSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const collName = String(params.collection || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      const docPath = String(params.path || "").trim();
+      const content = String(params.content ?? "");
+      const append = Boolean(params.append);
+
+      if (!collName) {
+        return { content: [{ type: "text" as const, text: "Error: collection is required." }] };
+      }
+      if (!docPath) {
+        return { content: [{ type: "text" as const, text: "Error: path is required." }] };
+      }
+      if (docPath === "_meta.json") {
+        return {
+          content: [
+            { type: "text" as const, text: "Error: cannot write to _meta.json (reserved)." },
+          ],
+        };
+      }
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "Error: content is required." }] };
+      }
+
+      try {
+        // Verify this is an agent collection
+        const metaResp = await vaultFetch(
+          `${baseUrl}/raw/${encodeURIComponent(collName)}/${encodeURIComponent("_meta.json")}`,
+          {
+            method: "GET",
+            signal,
+          },
+        );
+        if (!metaResp.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: "${collName}" is not an agent collection. Create it first with vault_agent_collection_create.`,
+              },
+            ],
+          };
+        }
+        const metaText = await metaResp.text();
+        try {
+          const meta = JSON.parse(metaText);
+          if (meta.source !== "agent") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Error: "${collName}" is not an agent collection (source: ${meta.source}).`,
+                },
+              ],
+            };
+          }
+        } catch {
+          return {
+            content: [
+              { type: "text" as const, text: `Error: "${collName}" has invalid _meta.json.` },
+            ],
+          };
+        }
+
+        // Write or append
+        const encodedColl = encodeURIComponent(collName);
+        const encodedPath = encodeURIComponent(docPath);
+        let resp: Response;
+
+        if (append) {
+          resp = await vaultFetch(`${baseUrl}/raw/${encodedColl}/${encodedPath}/append`, {
+            method: "POST",
+            body: content,
+            signal,
+          });
+        } else {
+          resp = await vaultFetch(`${baseUrl}/raw/${encodedColl}/${encodedPath}`, {
+            method: "PUT",
+            body: content,
+            signal,
+          });
+        }
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [{ type: "text" as const, text: `Write error (${resp.status}): ${errText}` }],
+          };
+        }
+
+        // Trigger embedding
+        vaultFetch(`${baseUrl}/embed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }).catch(() => {});
+
+        const action = append ? "appended to" : "wrote";
+        return {
+          content: [
+            { type: "text" as const, text: `Successfully ${action} ${collName}/${docPath}` },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_agent_collection_list -------------------------------------------
+  const vaultAgentCollectionList: AnyAgentTool = {
+    name: "vault_agent_collection_list",
+    label: "List Agent Collections",
+    description:
+      "List all agent-managed collections in the vault. " +
+      "Returns collection names, descriptions, and document counts. " +
+      "Use this to discover existing agent collections before writing to them.",
+    parameters: VaultAgentCollectionListSchema,
+    async execute(_toolCallId: string, _params: Record<string, unknown>, signal?: AbortSignal) {
+      try {
+        // Get vault status to discover all collections
+        const statusResp = await vaultFetch(`${baseUrl}/status`, {
+          method: "GET",
+          signal,
+        });
+        if (!statusResp.ok) {
+          const errText = await statusResp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Status error (${statusResp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const status = (await statusResp.json()) as {
+          collections?: Array<{ name: string; documents?: number }>;
+        };
+        const collections = status.collections ?? [];
+
+        // Check each collection for _meta.json with source:"agent"
+        const agentCollections: Array<{ name: string; description: string; docs: number }> = [];
+
+        for (const coll of collections) {
+          if (coll.name.startsWith("_")) {
+            continue; // Skip system collections
+          }
+          try {
+            const metaResp = await vaultFetch(
+              `${baseUrl}/raw/${encodeURIComponent(coll.name)}/${encodeURIComponent("_meta.json")}`,
+              { method: "GET", signal },
+            );
+            if (!metaResp.ok) {
+              continue;
+            }
+            const metaText = await metaResp.text();
+            const meta = JSON.parse(metaText);
+            if (meta.source === "agent") {
+              agentCollections.push({
+                name: coll.name,
+                description: meta.description || "",
+                docs: Math.max(0, (coll.documents ?? 1) - 1), // Subtract _meta.json
+              });
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        if (agentCollections.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "No agent collections found. Create one with vault_agent_collection_create.",
+              },
+            ],
+          };
+        }
+
+        const lines = agentCollections.map(
+          (c) =>
+            `• ${c.name} — ${c.description || "(no description)"} (${c.docs} doc${c.docs !== 1 ? "s" : ""})`,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Agent collections (${agentCollections.length}):\n${lines.join("\n")}`,
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -2710,6 +3082,9 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultMemorySearch,
     vaultMemoryGet,
     vaultMemoryWrite,
+    vaultAgentCollectionCreate,
+    vaultAgentCollectionWrite,
+    vaultAgentCollectionList,
     vaultArtifactWrite,
     vaultArtifactList,
     vaultPresentationBuild,

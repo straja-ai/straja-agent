@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { appendVaultAuthCurlArgs, formatVaultCurlError } from "./http.js";
 
 const COLLECTION = "_sessions_store";
-const TIMEOUT_MS = 5_000;
+const TIMEOUT_MS = 12_000;
 
 /** Well-known Symbol used to pass vault session-store ops from plugin → bundle. */
 export const SESSION_STORE_PATCH_KEY = Symbol.for("openclaw.sessionStorePatchCallback");
@@ -22,6 +22,18 @@ function storePathToVaultKey(storePath: string): string {
   const normalized = normalizeStorePath(storePath);
   const hash = createHash("sha256").update(normalized).digest("hex");
   return `stores/${hash}.json`;
+}
+
+function isTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return [
+    "ETIMEDOUT",
+    "request timed out",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "HTTP 503",
+    "aborted",
+  ].some((p) => msg.includes(p));
 }
 
 function syncHttpGet(url: string): { status: number; body: string } {
@@ -76,31 +88,66 @@ function syncHttpPut(url: string, body: string): void {
 }
 
 function createVaultSessionStoreOps(baseUrl: string): SessionStorePatchOps {
+  /** In-memory cache so we can survive transient vault failures. */
+  const cache = new Map<string, Record<string, unknown>>();
+
   const loadSessionStore = (storePath: string): Record<string, unknown> => {
     const key = storePathToVaultKey(storePath);
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
-    const resp = syncHttpGet(url);
-    if (resp.status === 404) {
-      return {};
+    try {
+      const resp = syncHttpGet(url);
+      if (resp.status === 404) {
+        const empty = {};
+        cache.set(key, empty);
+        return empty;
+      }
+      if (resp.status !== 200) {
+        throw new Error(`Vault session-store read failed (${resp.status}) for key ${key}`);
+      }
+      if (!resp.body.trim()) {
+        const empty = {};
+        cache.set(key, empty);
+        return empty;
+      }
+      const parsed = JSON.parse(resp.body) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Vault session-store payload is not an object for key ${key}`);
+      }
+      const result = parsed as Record<string, unknown>;
+      cache.set(key, result);
+      return result;
+    } catch (err) {
+      // On transient error, return cached version if available
+      if (isTransientError(err)) {
+        const cached = cache.get(key);
+        if (cached) {
+          console.warn(
+            `[straja-vault] session-store GET failed (transient), using cached: ${err instanceof Error ? err.message : err}`,
+          );
+          return cached;
+        }
+      }
+      throw err;
     }
-    if (resp.status !== 200) {
-      throw new Error(`Vault session-store read failed (${resp.status}) for key ${key}`);
-    }
-    if (!resp.body.trim()) {
-      return {};
-    }
-    const parsed = JSON.parse(resp.body) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(`Vault session-store payload is not an object for key ${key}`);
-    }
-    return parsed as Record<string, unknown>;
   };
 
   const saveSessionStore = (storePath: string, store: Record<string, unknown>) => {
     const key = storePathToVaultKey(storePath);
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
     const body = JSON.stringify(store, null, 2);
-    syncHttpPut(url, body);
+    // Always update cache so reads see the latest even if vault write is queued
+    cache.set(key, store);
+    try {
+      syncHttpPut(url, body);
+    } catch (err) {
+      if (isTransientError(err)) {
+        console.warn(
+          `[straja-vault] session-store PUT failed (transient), cached locally: ${err instanceof Error ? err.message : err}`,
+        );
+        return; // Data is in cache; vault write queue or next save will persist it
+      }
+      throw err;
+    }
   };
 
   return { loadSessionStore, saveSessionStore };
