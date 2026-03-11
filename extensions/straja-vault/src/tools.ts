@@ -732,9 +732,11 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         }
 
         // Format results for the LLM
-        const lines = results.map(
-          (r, i) => `[${i + 1}] ${r.title} (${r.file}) — score: ${r.score}\n${r.snippet}`,
-        );
+        const lines = results.map((r, i) => {
+          const hasSourceAsset = r.snippet.includes("_source_asset");
+          const tag = hasSourceAsset ? " [has original file — use vault_exec for exact data]" : "";
+          return `[${i + 1}] ${r.title} (${r.file}) — score: ${r.score}${tag}\n${r.snippet}`;
+        });
         const text = `Found ${results.length} result(s):\n\n${lines.join("\n\n")}`;
 
         return {
@@ -755,7 +757,12 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     label: "Vault Get Document",
     description:
       "Retrieve the full text content of a document from Straja Vault. " +
-      "Use the collection name and file path from vault_search results.",
+      "Use the collection name and file path from vault_search results. " +
+      "Some documents (e.g. Google Drive spreadsheets) are JSON indexes " +
+      "with a _source_asset field pointing to the original binary file. " +
+      "When you see _source_asset, always use vault_exec to process the " +
+      "original file (e.g. with require('xlsx')) for accurate results " +
+      "instead of relying on the JSON index data.",
     parameters: VaultGetSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
       const collection = String(params.collection || "");
@@ -791,7 +798,24 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
           docid: string;
         };
 
-        const text = `# ${data.title}\n\nPath: ${data.displayPath}\nDoc ID: ${data.docid}\n\n${data.content}`;
+        // Detect _source_asset in the document content — this means the JSON
+        // is an index for a binary original file (e.g. xlsx from Google Drive).
+        // Add a prominent hint so the agent knows to use the original file.
+        let sourceAssetHint = "";
+        try {
+          const parsed = JSON.parse(data.content);
+          if (parsed && typeof parsed._source_asset === "string") {
+            sourceAssetHint =
+              `\n\n⚠️ IMPORTANT: This JSON is a search index only — the data may be truncated or have ` +
+              `formatting artifacts. The original source file is available at: ${parsed._source_asset}\n` +
+              `For accurate data extraction, use vault_exec to process the original file directly, e.g.:\n` +
+              `  node -e "const XLSX = require('xlsx'); const wb = XLSX.readFile('${parsed._source_asset}'); ..."`;
+          }
+        } catch {
+          // Not JSON — no hint needed
+        }
+
+        const text = `# ${data.title}\n\nPath: ${data.displayPath}\nDoc ID: ${data.docid}\n\n${data.content}${sourceAssetHint}`;
 
         return {
           content: [{ type: "text" as const, text }],
@@ -845,10 +869,14 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     description:
       "Execute a command in a sandboxed environment with access to workspace files. " +
       "The vault materializes all workspace files into a temporary directory, " +
+      "including binary assets from the editable collection (e.g. original xlsx files under gdrive/), " +
       "runs the command in a kernel-enforced sandbox (nono), " +
       "and captures any new or modified files back into the vault. " +
       "Use this to run scripts, tests, builds, or any command that operates on workspace files. " +
       "The command cannot access the host filesystem outside the workspace. " +
+      "Pre-installed Node.js libraries are available via require(): xlsx (spreadsheet parsing), " +
+      "and other vault-bundled packages. Prefer `node -e \"...\"` with require('xlsx') " +
+      "for spreadsheet processing instead of writing manual parsers. " +
       "Commands that complete within 5 seconds return results immediately. " +
       "Longer-running commands are automatically backgrounded — " +
       "use vault_process to poll output, write stdin, or kill the process. " +
