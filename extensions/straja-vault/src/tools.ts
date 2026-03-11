@@ -162,6 +162,33 @@ export const VaultArtifactUrlSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
+// Note Schema
+// ---------------------------------------------------------------------------
+
+export const VaultNoteCreateSchema = Type.Object({
+  title: Type.String({
+    description: "Note title.",
+  }),
+  content: Type.String({
+    description: "Note content (markdown supported).",
+  }),
+});
+
+export const VaultNoteUpdateSchema = Type.Object({
+  path: Type.String({
+    description:
+      "The note's file path in the _notes collection (e.g. 'shopping-list-20260311143022.md'). " +
+      "Find this by searching the vault first.",
+  }),
+  title: Type.String({
+    description: "Updated note title.",
+  }),
+  content: Type.String({
+    description: "Updated note content (markdown supported).",
+  }),
+});
+
+// ---------------------------------------------------------------------------
 // Agent Collection Schemas
 // ---------------------------------------------------------------------------
 
@@ -1452,6 +1479,118 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         const action = append ? "appended to" : "wrote";
         return {
           content: [{ type: "text" as const, text: `Successfully ${action} _memory/${path}` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_note_create -------------------------------------------------------
+  const vaultNoteCreate: AnyAgentTool = {
+    name: "vault_note_create",
+    label: "Create Note",
+    description:
+      "Create a note in the vault's _notes collection. " +
+      "Use this whenever the user asks to create, save, or jot down a note. " +
+      "Notes are stored as markdown files and are automatically embedded for semantic search.",
+    parameters: VaultNoteCreateSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const title = String(params.title || "").trim();
+      const content = String(params.content ?? "").trim();
+
+      if (!title) {
+        return { content: [{ type: "text" as const, text: "Error: title is required." }] };
+      }
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "Error: content is required." }] };
+      }
+
+      try {
+        const resp = await vaultFetch(`${baseUrl}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, content }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Note creation error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const result = (await resp.json()) as { path: string; title: string; size: number };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Created note "${result.title}" in _notes collection (${result.path}, ${result.size} bytes).`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_note_update -------------------------------------------------------
+  const vaultNoteUpdate: AnyAgentTool = {
+    name: "vault_note_update",
+    label: "Update Note",
+    description:
+      "Update an existing note in the vault's _notes collection. " +
+      "Use this when the user asks to edit, update, or modify a note. " +
+      "You must provide the exact path of the note, which you can find by searching the vault.",
+    parameters: VaultNoteUpdateSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const path = String(params.path || "").trim();
+      const title = String(params.title || "").trim();
+      const content = String(params.content ?? "").trim();
+
+      if (!path) {
+        return { content: [{ type: "text" as const, text: "Error: path is required." }] };
+      }
+      if (!title) {
+        return { content: [{ type: "text" as const, text: "Error: title is required." }] };
+      }
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "Error: content is required." }] };
+      }
+
+      try {
+        const resp = await vaultFetch(`${baseUrl}/notes/${encodeURIComponent(path)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title, content }),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Note update error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const result = (await resp.json()) as { path: string; title: string; size: number };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Updated note "${result.title}" in _notes collection (${result.path}, ${result.size} bytes).`,
+            },
+          ],
         };
       } catch (err) {
         return {
@@ -3110,6 +3249,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultMemorySearch,
     vaultMemoryGet,
     vaultMemoryWrite,
+    vaultNoteCreate,
+    vaultNoteUpdate,
     vaultAgentCollectionCreate,
     vaultAgentCollectionWrite,
     vaultAgentCollectionList,

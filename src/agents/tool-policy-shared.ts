@@ -47,6 +47,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "vault_agent_collection_create",
     "vault_agent_collection_write",
     "vault_agent_collection_list",
+    "vault_note_create",
+    "vault_note_update",
   ],
   // Automation + infra
   "group:automation": ["vault_cron", "gateway"],

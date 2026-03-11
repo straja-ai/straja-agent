@@ -140,10 +140,15 @@ export function isTransientSessionWriteError(err: unknown): boolean {
   return [
     "ETIMEDOUT",
     "request timed out",
+    "HTTP 500",
+    "HTTP 502",
     "HTTP 503",
+    "HTTP 504",
     "Database busy, retry request",
     "database is locked",
     "SQLITE_BUSY",
+    "SQLITE_CONSTRAINT",
+    "FOREIGN KEY constraint",
     "ECONNRESET",
     "ECONNREFUSED",
     "aborted",
@@ -245,8 +250,16 @@ function applyPatch(
         syncHttpWrite("POST", rawUrl(key) + "/append", JSON.stringify(entry));
       }
     } catch (err: unknown) {
+      // NEVER throw from _persist — session persistence failures must not crash
+      // the agent. Defer for retry; if not recognized as transient, force-defer
+      // with a loud warning.
       if (deferVaultSessionWrite(this, err)) return;
-      throw err;
+      this._vaultFlushed = false;
+      this.flushed = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[straja-vault] Session persist failed (non-transient, deferred anyway): ${msg}`,
+      );
     }
   };
 
@@ -261,8 +274,14 @@ function applyPatch(
       this._vaultFlushed = true;
       this.flushed = true;
     } catch (err: unknown) {
+      // NEVER throw — defer for retry regardless of error type.
       if (deferVaultSessionWrite(this, err)) return;
-      throw err;
+      this._vaultFlushed = false;
+      this.flushed = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[straja-vault] Session rewrite failed (non-transient, deferred anyway): ${msg}`,
+      );
     }
   };
 
@@ -311,7 +330,15 @@ function applyPatch(
         this._vaultFlushed = true;
         this.flushed = true;
       } catch (err: unknown) {
-        if (!deferVaultSessionWrite(this, err)) throw err;
+        // NEVER throw — defer for retry regardless of error type.
+        if (!deferVaultSessionWrite(this, err)) {
+          this._vaultFlushed = false;
+          this.flushed = false;
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[straja-vault] Session branch write failed (non-transient, deferred anyway): ${msg}`,
+          );
+        }
       }
     }
     return result;
