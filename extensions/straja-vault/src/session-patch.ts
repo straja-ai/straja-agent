@@ -26,8 +26,17 @@
  * - Disk writes are SUPPRESSED (origPersist / origRewriteFile are NOT called).
  * - Vault writes use synchronous curl to localhost so data is available
  *   before the gateway broadcasts events to the UI.
+ * - The vault has an in-memory write queue that handles all SQLite contention
+ *   internally. The agent never sees SQLITE_BUSY or FK errors — those are
+ *   resolved by the vault's drain worker.
  * - Reads (setSessionFile) load exclusively from vault. 404 means "new empty
  *   session"; transport/non-404 failures throw (fail closed).
+ * - A background flush timer (5s) acts as a safety net: if the vault process
+ *   is temporarily unreachable, deferred writes are retried until they succeed.
+ *
+ * CRITICAL: _persist, _rewriteFile, and createBranchedSession NEVER throw.
+ * Any write failure is silently deferred — the background flush timer will
+ * retry. This ensures the agent process never crashes due to vault errors.
  *
  * The vault must be running on the configured baseUrl for this to work.
  */
@@ -38,8 +47,7 @@ import { resolve } from "node:path";
 import { appendVaultAuthCurlArgs, formatVaultCurlError } from "./http.js";
 
 const COLLECTION = "_sessions";
-const SESSION_WRITE_WARNING_INTERVAL_MS = 30_000;
-let lastSessionWriteWarningAt = 0;
+const BACKGROUND_FLUSH_INTERVAL_MS = 5_000;
 
 /** Well-known Symbol used to pass the patch callback from plugin -> bundle. */
 export const SESSION_PATCH_KEY = Symbol.for("openclaw.sessionPatchCallback");
@@ -121,7 +129,7 @@ function syncHttpWrite(method: string, url: string, body: string): void {
         input: body,
         encoding: "utf-8",
         timeout: 12_000,
-        maxBuffer: 1024,
+        maxBuffer: 10_240,
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
@@ -135,37 +143,15 @@ function syncHttpWrite(method: string, url: string, body: string): void {
   }
 }
 
-export function isTransientSessionWriteError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? "");
-  return [
-    "ETIMEDOUT",
-    "request timed out",
-    "HTTP 500",
-    "HTTP 502",
-    "HTTP 503",
-    "HTTP 504",
-    "Database busy, retry request",
-    "database is locked",
-    "SQLITE_BUSY",
-    "SQLITE_CONSTRAINT",
-    "FOREIGN KEY constraint",
-    "ECONNRESET",
-    "ECONNREFUSED",
-    "aborted",
-  ].some((pattern) => msg.includes(pattern));
-}
-
-function deferVaultSessionWrite(sessionManager: any, err: unknown): boolean {
-  if (!isTransientSessionWriteError(err)) return false;
+/**
+ * Unconditionally defer a session write. Marks the session as unflushed
+ * so the background flush timer will retry later. NEVER throws.
+ */
+function deferSessionWrite(sessionManager: any, err: unknown, context: string): void {
   sessionManager._vaultFlushed = false;
   sessionManager.flushed = false;
-  const now = Date.now();
-  if (now - lastSessionWriteWarningAt >= SESSION_WRITE_WARNING_INTERVAL_MS) {
-    lastSessionWriteWarningAt = now;
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[straja-vault] Deferred session persistence after transient vault error: ${msg}`);
-  }
-  return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  console.warn(`[straja-vault] ${context} — deferred for retry: ${msg}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +206,60 @@ function applyPatch(
 
   // No original methods saved — disk I/O is fully suppressed.
 
+  // -- Track unflushed sessions for background retry -------------------------
+  // We use a Set<WeakRef> so that GC'd sessions are automatically cleaned up.
+  const unflushedSessions = new Set<WeakRef<any>>();
+  const registry = new FinalizationRegistry<WeakRef<any>>((ref) => {
+    unflushedSessions.delete(ref);
+  });
+
+  function trackUnflushed(sm: any): void {
+    // Avoid duplicates — check if already tracked
+    for (const ref of unflushedSessions) {
+      if (ref.deref() === sm) return;
+    }
+    const weakRef = new WeakRef(sm);
+    unflushedSessions.add(weakRef);
+    registry.register(sm, weakRef);
+  }
+
+  function untrackUnflushed(sm: any): void {
+    for (const ref of unflushedSessions) {
+      if (ref.deref() === sm) {
+        unflushedSessions.delete(ref);
+        return;
+      }
+    }
+  }
+
+  // -- Background flush timer (safety net) -----------------------------------
+  // Retries writes for sessions that failed to persist. Runs every 5s.
+  // This is ONLY needed when the vault process itself is unreachable —
+  // the vault's internal write queue handles all SQLite contention.
+  setInterval(() => {
+    for (const ref of unflushedSessions) {
+      const sm = ref.deref();
+      if (!sm) {
+        unflushedSessions.delete(ref);
+        continue;
+      }
+      if (sm.flushed || !sm.persist || !sm.sessionFile) continue;
+      if (!sm.fileEntries?.length) continue;
+
+      const key = sessionPathToVaultKey(sm.sessionFile);
+      const content = sm.fileEntries.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
+      try {
+        syncHttpWrite("PUT", rawUrl(key), content);
+        sm._vaultFlushed = true;
+        sm.flushed = true;
+        untrackUnflushed(sm);
+        console.log("[straja-vault] Background flush succeeded for session", key);
+      } catch {
+        // Still unreachable — will retry on next tick. No log spam.
+      }
+    }
+  }, BACKGROUND_FLUSH_INTERVAL_MS).unref();
+
   // -- Override _persist(entry) ---------------------------------------------
   // Vault-only write (synchronous, fail-closed).
   // Note: _persist is called by _appendEntry which already pushed entry to
@@ -245,21 +285,15 @@ function applyPatch(
         syncHttpWrite("PUT", rawUrl(key), content);
         this._vaultFlushed = true;
         this.flushed = true;
+        untrackUnflushed(this);
       } else {
         // Incremental: append just this entry
         syncHttpWrite("POST", rawUrl(key) + "/append", JSON.stringify(entry));
       }
     } catch (err: unknown) {
-      // NEVER throw from _persist — session persistence failures must not crash
-      // the agent. Defer for retry; if not recognized as transient, force-defer
-      // with a loud warning.
-      if (deferVaultSessionWrite(this, err)) return;
-      this._vaultFlushed = false;
-      this.flushed = false;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[straja-vault] Session persist failed (non-transient, deferred anyway): ${msg}`,
-      );
+      // NEVER throw — defer unconditionally. Background flush timer retries.
+      deferSessionWrite(this, err, "Session persist failed");
+      trackUnflushed(this);
     }
   };
 
@@ -273,15 +307,11 @@ function applyPatch(
       syncHttpWrite("PUT", rawUrl(key), content);
       this._vaultFlushed = true;
       this.flushed = true;
+      untrackUnflushed(this);
     } catch (err: unknown) {
-      // NEVER throw — defer for retry regardless of error type.
-      if (deferVaultSessionWrite(this, err)) return;
-      this._vaultFlushed = false;
-      this.flushed = false;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `[straja-vault] Session rewrite failed (non-transient, deferred anyway): ${msg}`,
-      );
+      // NEVER throw — defer unconditionally. Background flush timer retries.
+      deferSessionWrite(this, err, "Session rewrite failed");
+      trackUnflushed(this);
     }
   };
 
@@ -329,16 +359,11 @@ function applyPatch(
         syncHttpWrite("PUT", rawUrl(key), content);
         this._vaultFlushed = true;
         this.flushed = true;
+        untrackUnflushed(this);
       } catch (err: unknown) {
-        // NEVER throw — defer for retry regardless of error type.
-        if (!deferVaultSessionWrite(this, err)) {
-          this._vaultFlushed = false;
-          this.flushed = false;
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[straja-vault] Session branch write failed (non-transient, deferred anyway): ${msg}`,
-          );
-        }
+        // NEVER throw — defer unconditionally. Background flush timer retries.
+        deferSessionWrite(this, err, "Session branch write failed");
+        trackUnflushed(this);
       }
     }
     return result;
