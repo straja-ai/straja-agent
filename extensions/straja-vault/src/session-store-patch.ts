@@ -36,6 +36,10 @@ function isTransientError(err: unknown): boolean {
   ].some((p) => msg.includes(p));
 }
 
+function isLockedStatus(status: number): boolean {
+  return status === 423;
+}
+
 function syncHttpGet(url: string): { status: number; body: string } {
   const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
   try {
@@ -96,6 +100,9 @@ function createVaultSessionStoreOps(baseUrl: string): SessionStorePatchOps {
     const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(key)}`;
     try {
       const resp = syncHttpGet(url);
+      if (isLockedStatus(resp.status)) {
+        throw new Error(`Vault session-store is locked for key ${key}`);
+      }
       if (resp.status === 404) {
         const empty = {};
         cache.set(key, empty);
