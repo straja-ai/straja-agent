@@ -10,9 +10,13 @@ import { refreshQwenPortalCredentials } from "../../providers/qwen-portal-oauth.
 import { refreshChutesTokens } from "../chutes-oauth.js";
 import { AUTH_STORE_LOCK_OPTIONS, log } from "./constants.js";
 import { formatAuthDoctorHint } from "./doctor.js";
-import { ensureAuthStoreFile, resolveAuthStorePath } from "./paths.js";
+import { ensureAuthStoreFile } from "./paths.js";
 import { suggestOAuthProfileIdForLegacyDefault } from "./repair.js";
-import { ensureAuthProfileStore, saveAuthProfileStore } from "./store.js";
+import {
+  ensureAuthProfileStore,
+  resolveAuthProfileStoreLockPath,
+  saveAuthProfileStore,
+} from "./store.js";
 import type { AuthProfileStore } from "./types.js";
 
 const OAUTH_PROVIDER_IDS = new Set<string>(getOAuthProviders().map((provider) => provider.id));
@@ -138,7 +142,7 @@ async function refreshOAuthTokenWithLock(params: {
   profileId: string;
   agentDir?: string;
 }): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
-  const authPath = resolveAuthStorePath(params.agentDir);
+  const authPath = resolveAuthProfileStoreLockPath(params.agentDir);
   ensureAuthStoreFile(authPath);
 
   return await withFileLock(authPath, AUTH_STORE_LOCK_OPTIONS, async () => {

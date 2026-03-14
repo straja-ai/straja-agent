@@ -36,6 +36,33 @@ describe("vault-fs-operations", () => {
     expect(vaultFetchMock).toHaveBeenCalledWith(`${baseUrl}/raw/_memory/memory%2F2026-03-09.md`);
   });
 
+  it("treats missing daily memory files as empty reads", async () => {
+    vaultFetchMock.mockResolvedValue(new Response("not found", { status: 404 }));
+    const ops = createVaultReadOperations(baseUrl, workspaceRoot);
+
+    const result = await ops.readFile("/Users/test/.openclaw/workspace/memory/2026-03-09.md");
+
+    expect(result.toString("utf-8")).toBe("");
+  });
+
+  it("treats missing daily memory files as accessible", async () => {
+    vaultFetchMock.mockResolvedValue(new Response("not found", { status: 404 }));
+    const ops = createVaultReadOperations(baseUrl, workspaceRoot);
+
+    await expect(
+      ops.access("/Users/test/.openclaw/workspace/memory/2026-03-09.md"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still errors for missing normal workspace files", async () => {
+    vaultFetchMock.mockResolvedValue(new Response("not found", { status: 404 }));
+    const ops = createVaultReadOperations(baseUrl, workspaceRoot);
+
+    await expect(ops.readFile("/Users/test/.openclaw/workspace/AGENTS.md")).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+
   it("routes MEMORY.md writes to _memory", async () => {
     vaultFetchMock.mockResolvedValue(new Response("{}", { status: 200 }));
     const ops = createVaultWriteOperations(baseUrl, workspaceRoot);

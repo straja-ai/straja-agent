@@ -61,6 +61,10 @@ function rawUrl(baseUrl: string, key: string): string {
   return `${baseUrl}/raw/${collection}/${encodeURIComponent(key)}`;
 }
 
+function isMissingMemoryFile(status: number, key: string): boolean {
+  return status === 404 && collectionForKey(key) === MEMORY_COLLECTION;
+}
+
 // ---------------------------------------------------------------------------
 // MIME type detection (extension-based, no filesystem magic bytes)
 // ---------------------------------------------------------------------------
@@ -102,6 +106,9 @@ export function createVaultReadOperations(
       const key = toVaultKey(absolutePath, workspaceRoot);
       const resp = await vaultFetch(rawUrl(baseUrl, key));
       if (!resp.ok) {
+        if (isMissingMemoryFile(resp.status, key)) {
+          return Buffer.from("", "utf-8");
+        }
         throw new Error(`ENOENT: no such file or directory, open '${absolutePath}'`);
       }
       const text = await resp.text();
@@ -112,6 +119,10 @@ export function createVaultReadOperations(
       const key = toVaultKey(absolutePath, workspaceRoot);
       const resp = await vaultFetch(rawUrl(baseUrl, key), { method: "GET" });
       if (!resp.ok) {
+        if (isMissingMemoryFile(resp.status, key)) {
+          await resp.text();
+          return;
+        }
         throw new Error(`ENOENT: no such file or directory, access '${absolutePath}'`);
       }
       // Consume body to avoid connection leak

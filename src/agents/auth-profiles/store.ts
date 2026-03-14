@@ -25,6 +25,14 @@ function resolveVaultAuthProfileOps(): AuthProfileStorePatchOps | undefined {
   return factory?.();
 }
 
+export function resolveAuthProfileStoreLockPath(agentDir?: string): string {
+  const vaultOps = resolveVaultAuthProfileOps();
+  if (vaultOps) {
+    return resolveAuthStorePath();
+  }
+  return resolveAuthStorePath(agentDir);
+}
+
 // ---------------------------------------------------------------------------
 
 type LegacyAuthStore = Record<string, AuthProfileCredential>;
@@ -41,23 +49,7 @@ export async function updateAuthProfileStoreWithLock(params: {
   agentDir?: string;
   updater: (store: AuthProfileStore) => boolean;
 }): Promise<AuthProfileStore | null> {
-  const vaultOps = resolveVaultAuthProfileOps();
-
-  // When vault is active, skip file lock (vault handles atomicity).
-  if (vaultOps) {
-    try {
-      const store = ensureAuthProfileStore(params.agentDir);
-      const shouldSave = params.updater(store);
-      if (shouldSave) {
-        saveAuthProfileStore(store, params.agentDir);
-      }
-      return store;
-    } catch {
-      return null;
-    }
-  }
-
-  const authPath = resolveAuthStorePath(params.agentDir);
+  const authPath = resolveAuthProfileStoreLockPath(params.agentDir);
   ensureAuthStoreFile(authPath);
 
   try {
