@@ -250,27 +250,11 @@ function applyLegacyStore(store: AuthProfileStore, legacy: LegacyAuthStore): voi
 export function loadAuthProfileStore(): AuthProfileStore {
   const vaultOps = resolveVaultAuthProfileOps();
 
-  // Vault path: load from vault, sync external CLIs, save back if changed.
+  // Vault path: Vault is the only source of truth.
+  // Do not import from disk or external CLIs in vault-backed mode.
   if (vaultOps) {
     const authPath = resolveAuthStorePath();
-    let store = vaultOps.loadAuthProfileStore(authPath);
-
-    // One-time migration: if vault is empty, check disk for existing auth-profiles
-    if (Object.keys(store.profiles).length === 0) {
-      const diskRaw = loadJsonFile(authPath);
-      const diskStore = coerceAuthStore(diskRaw);
-      if (diskStore && Object.keys(diskStore.profiles).length > 0) {
-        log.info("migrating auth-profiles from disk to vault");
-        vaultOps.saveAuthProfileStore(authPath, diskStore);
-        store = diskStore;
-      }
-    }
-
-    const synced = syncExternalCliCredentials(store);
-    if (synced) {
-      vaultOps.saveAuthProfileStore(authPath, store);
-    }
-    return store;
+    return vaultOps.loadAuthProfileStore(authPath);
   }
 
   // Disk path (original)
@@ -310,27 +294,10 @@ function loadAuthProfileStoreForAgent(
   const vaultOps = resolveVaultAuthProfileOps();
 
   // Vault path: single shared store, no per-agent-dir separation needed.
-  // Vault is the single source of truth — skip legacy migration, skip subagent inheritance.
+  // Vault is the only source of truth — no disk migration and no external CLI import.
   if (vaultOps) {
     const authPath = resolveAuthStorePath(agentDir);
-    let store = vaultOps.loadAuthProfileStore(authPath);
-
-    // One-time migration: if vault is empty, check disk for existing auth-profiles
-    if (Object.keys(store.profiles).length === 0) {
-      const diskRaw = loadJsonFile(authPath);
-      const diskStore = coerceAuthStore(diskRaw);
-      if (diskStore && Object.keys(diskStore.profiles).length > 0) {
-        log.info("migrating auth-profiles from disk to vault", { agentDir });
-        vaultOps.saveAuthProfileStore(authPath, diskStore);
-        store = diskStore;
-      }
-    }
-
-    const synced = syncExternalCliCredentials(store);
-    if (synced) {
-      vaultOps.saveAuthProfileStore(authPath, store);
-    }
-    return store;
+    return vaultOps.loadAuthProfileStore(authPath);
   }
 
   // Disk path (original)

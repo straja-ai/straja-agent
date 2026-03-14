@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ensureAuthProfileStore } from "./auth-profiles.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
 
@@ -118,6 +118,55 @@ describe("ensureAuthProfileStore", () => {
         delete process.env.PI_CODING_AGENT_DIR;
       } else {
         process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not import disk auth into a vault-backed store", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-auth-vault-only-"));
+    const agentDir = path.join(root, "agent");
+    const authPath = path.join(agentDir, "auth-profiles.json");
+    const patchKey = Symbol.for("openclaw.authProfileStorePatchCallback");
+    const globalRecord = globalThis as Record<symbol, unknown>;
+    const previousFactory = globalRecord[patchKey];
+    const loadAuthProfileStore = vi.fn(() => ({ version: AUTH_STORE_VERSION, profiles: {} }));
+    const saveAuthProfileStore = vi.fn();
+
+    try {
+      fs.mkdirSync(agentDir, { recursive: true });
+      fs.writeFileSync(
+        authPath,
+        `${JSON.stringify(
+          {
+            version: AUTH_STORE_VERSION,
+            profiles: {
+              "openai-codex:default": {
+                type: "oauth",
+                provider: "openai-codex",
+                access: "disk-access",
+                refresh: "disk-refresh",
+                expires: Date.now() + 60_000,
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      );
+
+      globalRecord[patchKey] = () => ({ loadAuthProfileStore, saveAuthProfileStore });
+
+      const store = ensureAuthProfileStore(agentDir);
+      expect(store.profiles).toEqual({});
+      expect(loadAuthProfileStore).toHaveBeenCalledOnce();
+      expect(saveAuthProfileStore).not.toHaveBeenCalled();
+    } finally {
+      if (previousFactory === undefined) {
+        delete globalRecord[patchKey];
+      } else {
+        globalRecord[patchKey] = previousFactory;
       }
       fs.rmSync(root, { recursive: true, force: true });
     }
