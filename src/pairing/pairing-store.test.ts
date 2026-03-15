@@ -27,10 +27,13 @@ afterAll(async () => {
 });
 
 async function withTempStateDir<T>(fn: (stateDir: string) => Promise<T>) {
-  const envSnapshot = captureEnv(["OPENCLAW_STATE_DIR"]);
+  const envSnapshot = captureEnv(["OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG"]);
   const dir = path.join(fixtureRoot, `case-${caseId++}`);
   await fs.mkdir(dir, { recursive: true });
+  const configPath = path.join(dir, "openclaw.json");
+  await fs.writeFile(configPath, "{}\n", "utf8");
   process.env.OPENCLAW_STATE_DIR = dir;
+  process.env.OPENCLAW_CONFIG = configPath;
   try {
     return await fn(dir);
   } finally {
@@ -186,6 +189,51 @@ describe("pairing store", () => {
       const channelScoped = await readChannelAllowFromStore("telegram");
       expect(accountScoped).toContain("12345");
       expect(channelScoped).not.toContain("12345");
+    });
+  });
+
+  it("persists approved ids in commands.ownerAllowFrom", async () => {
+    await withTempStateDir(async (stateDir) => {
+      const created = await upsertChannelPairingRequest({
+        channel: "telegram",
+        id: "8425169799",
+      });
+      expect(created.created).toBe(true);
+
+      const approved = await approveChannelPairingCode({
+        channel: "telegram",
+        code: created.code,
+      });
+      expect(approved?.id).toBe("8425169799");
+
+      const configPath = path.join(stateDir, "openclaw.json");
+      const rawConfig = await fs.readFile(configPath, "utf8");
+      const parsedConfig = JSON.parse(rawConfig) as {
+        commands?: {
+          ownerAllowFrom?: unknown[];
+        };
+      };
+      expect(parsedConfig.commands?.ownerAllowFrom).toContain("8425169799");
+
+      const createdAgain = await upsertChannelPairingRequest({
+        channel: "telegram",
+        id: "8425169799",
+      });
+      expect(createdAgain.created).toBe(true);
+      await approveChannelPairingCode({
+        channel: "telegram",
+        code: createdAgain.code,
+      });
+      const rawConfigAfter = await fs.readFile(configPath, "utf8");
+      const parsedAfter = JSON.parse(rawConfigAfter) as {
+        commands?: {
+          ownerAllowFrom?: unknown[];
+        };
+      };
+      const entries = (parsedAfter.commands?.ownerAllowFrom ?? []).filter(
+        (entry) => entry === "8425169799",
+      );
+      expect(entries).toHaveLength(1);
     });
   });
 

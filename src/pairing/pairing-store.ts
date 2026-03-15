@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { getPairingAdapter } from "../channels/plugins/pairing.js";
 import type { ChannelId, ChannelPairingAdapter } from "../channels/plugins/types.js";
+import {
+  readConfigFileSnapshot,
+  validateConfigObjectWithPlugins,
+  writeConfigFile,
+} from "../config/config.js";
 import { resolveOAuthDir, resolveStateDir } from "../config/paths.js";
 import { withFileLock as withPathLock } from "../infra/file-lock.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
@@ -311,6 +316,45 @@ function dedupePreserveOrder(entries: string[]): string[] {
     out.push(normalized);
   }
   return out;
+}
+
+async function ensureOwnerAllowFromConfigEntry(entry: string): Promise<void> {
+  const normalized = entry.trim();
+  if (!normalized) {
+    return;
+  }
+
+  const snapshot = await readConfigFileSnapshot();
+  if (!snapshot.valid || !snapshot.parsed || typeof snapshot.parsed !== "object") {
+    throw new Error("Config file is invalid; cannot update commands.ownerAllowFrom.");
+  }
+
+  const parsedConfig = structuredClone(snapshot.parsed as Record<string, unknown>);
+  const commandsValue = parsedConfig.commands;
+  const commands =
+    commandsValue && typeof commandsValue === "object" && !Array.isArray(commandsValue)
+      ? (commandsValue as Record<string, unknown>)
+      : {};
+  if (commands !== commandsValue) {
+    parsedConfig.commands = commands;
+  }
+
+  const existing = Array.isArray(commands.ownerAllowFrom)
+    ? commands.ownerAllowFrom.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
+  if (existing.includes(normalized)) {
+    return;
+  }
+  commands.ownerAllowFrom = [...existing, normalized];
+
+  const validated = validateConfigObjectWithPlugins(parsedConfig);
+  if (!validated.ok) {
+    const issue = validated.issues[0];
+    const issueMessage = issue ? `${issue.path}: ${issue.message}` : "unknown validation error";
+    throw new Error(`Config invalid after ownerAllowFrom update (${issueMessage}).`);
+  }
+
+  await writeConfigFile(validated.config);
 }
 
 async function readAllowFromStateForPath(
@@ -680,11 +724,10 @@ export async function approveChannelPairingCode(params: {
       if (!entry) {
         return null;
       }
-      pruned.splice(idx, 1);
-      await writeJsonFile(filePath, {
-        version: 1,
-        requests: pruned,
-      } satisfies PairingStore);
+      const ownerAllowFromEntry = normalizeAllowFromInput(params.channel, entry.id);
+      if (ownerAllowFromEntry) {
+        await ensureOwnerAllowFromConfigEntry(ownerAllowFromEntry);
+      }
       const entryAccountId = String(entry.meta?.accountId ?? "").trim() || undefined;
       await addChannelAllowFromStoreEntry({
         channel: params.channel,
@@ -692,6 +735,11 @@ export async function approveChannelPairingCode(params: {
         accountId: params.accountId?.trim() || entryAccountId,
         env,
       });
+      pruned.splice(idx, 1);
+      await writeJsonFile(filePath, {
+        version: 1,
+        requests: pruned,
+      } satisfies PairingStore);
       return { id: entry.id, entry };
     },
   );
