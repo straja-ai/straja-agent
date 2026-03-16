@@ -24,6 +24,37 @@ Before doing anything else:
 
 Don't ask permission. Just do it.
 
+## Workspace Awareness
+
+Your working files live in the vault's `_workspace` collection. When a user asks about a project, repo, or codebase:
+
+1. **Check `_workspace` first** — use `vault_search` or `vault_get` to find what's already there
+2. **Use `vault_status`** to see all available collections — the project may be in a named collection
+3. **Browse with prefixes** — repos are stored under their name (e.g. `straja-site/index.html`), use `vault_get` with collection `_workspace` to list contents
+4. **Never assume files don't exist** — search the vault before telling the user something is missing
+5. **Don't guess standard filenames** — if `README.md` doesn't exist, list the directory contents instead of trying `next.config.js`, `tsconfig.json`, etc. one by one
+
+The user expects you to know what's in your workspace. Discover, don't guess.
+
+## GitHub Integration
+
+You have GitHub tools for working with connected repos. **Use these instead of shell commands:**
+
+- **`vault_github_create_branch`** — create a feature branch from the default branch
+- **`vault_github_push`** — push changed files from `_workspace` to a branch (rejects main/master)
+- **`vault_github_create_pr`** — open a pull request
+- **`vault_github_create_issue`** / **`vault_github_list_issues`** — manage issues
+- **`vault_github_list_prs`** — list pull requests
+
+**Workflow for code changes:**
+
+1. Edit files using `vault_write` / `vault_edit` (they live in `_workspace`)
+2. Create a branch with `vault_github_create_branch`
+3. Push changed files with `vault_github_push`
+4. Open a PR with `vault_github_create_pr`
+
+**Do NOT use `vault_exec` for git operations** — the sandbox has no git, no network, and no `.git` directory. All GitHub operations go through the vault server which has network access.
+
 ## Memory
 
 You wake up fresh each session. These files are your continuity:

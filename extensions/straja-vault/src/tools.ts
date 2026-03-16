@@ -358,6 +358,126 @@ export const GmailUpdateDraftSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
+// GitHub Schemas
+// ---------------------------------------------------------------------------
+
+export const GitHubCreateIssueSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner (user or organization).",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  title: Type.String({
+    description: "Issue title.",
+  }),
+  body: Type.Optional(
+    Type.String({
+      description: "Issue body (markdown).",
+    }),
+  ),
+  labels: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Labels to apply to the issue.",
+    }),
+  ),
+});
+
+export const GitHubListIssuesSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner.",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  state: Type.Optional(
+    Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")], {
+      description: "Filter by state. Default: open.",
+      default: "open",
+    }),
+  ),
+});
+
+export const GitHubCreateBranchSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner.",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  branch: Type.String({
+    description: "New branch name (e.g. 'fix/login-bug').",
+  }),
+  from: Type.Optional(
+    Type.String({
+      description: "Base branch to create from. Defaults to the repo's default branch.",
+    }),
+  ),
+});
+
+export const GitHubCreatePRSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner.",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  title: Type.String({
+    description: "Pull request title.",
+  }),
+  body: Type.Optional(
+    Type.String({
+      description: "Pull request description (markdown).",
+    }),
+  ),
+  head: Type.String({
+    description: "Branch with changes (source branch).",
+  }),
+  base: Type.Optional(
+    Type.String({
+      description: "Target branch. Defaults to the repo's default branch.",
+    }),
+  ),
+});
+
+export const GitHubListPRsSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner.",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  state: Type.Optional(
+    Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")], {
+      description: "Filter by state. Default: open.",
+      default: "open",
+    }),
+  ),
+});
+
+export const GitHubPushSchema = Type.Object({
+  owner: Type.String({
+    description: "Repository owner.",
+  }),
+  repo: Type.String({
+    description: "Repository name.",
+  }),
+  branch: Type.String({
+    description: "Target branch to push to. CANNOT be main, master, or the repo's default branch.",
+  }),
+  files: Type.Array(
+    Type.Object({
+      path: Type.String({ description: "File path relative to repo root." }),
+      content: Type.String({ description: "File content." }),
+    }),
+    { description: "Files to push." },
+  ),
+  message: Type.String({
+    description: "Commit message.",
+  }),
+});
+
+// ---------------------------------------------------------------------------
 // Calendar Event Schemas
 // ---------------------------------------------------------------------------
 
@@ -2472,6 +2592,371 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // -- vault_github_create_issue -----------------------------------------------
+  const vaultGitHubCreateIssue: AnyAgentTool = {
+    name: "vault_github_create_issue",
+    label: "GitHub Create Issue",
+    description:
+      "Create a GitHub issue on a connected repository. " +
+      "Returns the issue number and URL. Only works when GitHub is connected.",
+    parameters: GitHubCreateIssueSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const title = String(params.title || "").trim();
+      if (!owner || !repo || !title) {
+        return {
+          content: [{ type: "text" as const, text: "Error: owner, repo, and title are required." }],
+        };
+      }
+      const payload: Record<string, unknown> = { owner, repo, title };
+      if (params.body) payload.body = String(params.body);
+      if (Array.isArray(params.labels)) payload.labels = params.labels;
+      try {
+        const resp = await vaultFetch(`${baseUrl}/connections/github/issues`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub issue error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const data = (await resp.json()) as { number: number; title: string; htmlUrl: string };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Issue created: #${data.number} — ${data.title}\n${data.htmlUrl}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_github_list_issues ------------------------------------------------
+  const vaultGitHubListIssues: AnyAgentTool = {
+    name: "vault_github_list_issues",
+    label: "GitHub List Issues",
+    description:
+      "List issues on a connected GitHub repository. Returns issue numbers, titles, state, and labels.",
+    parameters: GitHubListIssuesSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const state = String(params.state || "open");
+      if (!owner || !repo) {
+        return {
+          content: [{ type: "text" as const, text: "Error: owner and repo are required." }],
+        };
+      }
+      try {
+        const resp = await vaultFetch(
+          `${baseUrl}/connections/github/issues?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&state=${state}`,
+          { signal },
+        );
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub issues error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const issues = (await resp.json()) as Array<{
+          number: number;
+          title: string;
+          state: string;
+          labels: string[];
+          user: string;
+          htmlUrl: string;
+        }>;
+        if (!issues.length) {
+          return {
+            content: [
+              { type: "text" as const, text: `No ${state} issues found in ${owner}/${repo}.` },
+            ],
+          };
+        }
+        const lines = issues.map(
+          (i) =>
+            `#${i.number} [${i.state}] ${i.title}${i.labels.length ? ` (${i.labels.join(", ")})` : ""}`,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${issues.length} issues in ${owner}/${repo}:\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_github_create_branch ----------------------------------------------
+  const vaultGitHubCreateBranch: AnyAgentTool = {
+    name: "vault_github_create_branch",
+    label: "GitHub Create Branch",
+    description:
+      "Create a new branch on a connected GitHub repository. " +
+      "Defaults to branching from the repo's default branch if 'from' is not specified.",
+    parameters: GitHubCreateBranchSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const branch = String(params.branch || "").trim();
+      if (!owner || !repo || !branch) {
+        return {
+          content: [
+            { type: "text" as const, text: "Error: owner, repo, and branch are required." },
+          ],
+        };
+      }
+      const payload: Record<string, unknown> = { owner, repo, branch };
+      if (params.from) payload.from = String(params.from);
+      try {
+        const resp = await vaultFetch(`${baseUrl}/connections/github/branches`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub branch error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const data = (await resp.json()) as { ref: string; sha: string };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Branch created: ${branch}\nRef: ${data.ref}\nSHA: ${data.sha.slice(0, 7)}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_github_create_pr --------------------------------------------------
+  const vaultGitHubCreatePR: AnyAgentTool = {
+    name: "vault_github_create_pr",
+    label: "GitHub Create PR",
+    description:
+      "Create a pull request on a connected GitHub repository. " +
+      "Specify the head (source) branch. Base defaults to the repo's default branch. " +
+      "NOTE: You cannot merge PRs — only a human can do that.",
+    parameters: GitHubCreatePRSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const title = String(params.title || "").trim();
+      const head = String(params.head || "").trim();
+      if (!owner || !repo || !title || !head) {
+        return {
+          content: [
+            { type: "text" as const, text: "Error: owner, repo, title, and head are required." },
+          ],
+        };
+      }
+      const payload: Record<string, unknown> = { owner, repo, title, head };
+      if (params.body) payload.body = String(params.body);
+      if (params.base) payload.base = String(params.base);
+      try {
+        const resp = await vaultFetch(`${baseUrl}/connections/github/pull-requests`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub PR error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const data = (await resp.json()) as {
+          number: number;
+          title: string;
+          htmlUrl: string;
+          head: string;
+          base: string;
+        };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `PR created: #${data.number} — ${data.title}\n${data.head} → ${data.base}\n${data.htmlUrl}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_github_list_prs ---------------------------------------------------
+  const vaultGitHubListPRs: AnyAgentTool = {
+    name: "vault_github_list_prs",
+    label: "GitHub List PRs",
+    description: "List pull requests on a connected GitHub repository.",
+    parameters: GitHubListPRsSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const state = String(params.state || "open");
+      if (!owner || !repo) {
+        return {
+          content: [{ type: "text" as const, text: "Error: owner and repo are required." }],
+        };
+      }
+      try {
+        const resp = await vaultFetch(
+          `${baseUrl}/connections/github/pull-requests?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&state=${state}`,
+          { signal },
+        );
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub PRs error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const prs = (await resp.json()) as Array<{
+          number: number;
+          title: string;
+          state: string;
+          head: string;
+          base: string;
+          htmlUrl: string;
+        }>;
+        if (!prs.length) {
+          return {
+            content: [
+              { type: "text" as const, text: `No ${state} pull requests in ${owner}/${repo}.` },
+            ],
+          };
+        }
+        const lines = prs.map(
+          (p) => `#${p.number} [${p.state}] ${p.title} (${p.head} → ${p.base})`,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${prs.length} PRs in ${owner}/${repo}:\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_github_push -------------------------------------------------------
+  const vaultGitHubPush: AnyAgentTool = {
+    name: "vault_github_push",
+    label: "GitHub Push",
+    description:
+      "Push file changes to a branch on a connected GitHub repository via the Git Data API. " +
+      "CANNOT push to main, master, or the repo's default branch — create a feature branch first. " +
+      "Creates a commit with the specified files and message.",
+    parameters: GitHubPushSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const owner = String(params.owner || "").trim();
+      const repo = String(params.repo || "").trim();
+      const branch = String(params.branch || "").trim();
+      const message = String(params.message || "").trim();
+      const files = params.files as Array<{ path: string; content: string }> | undefined;
+      if (!owner || !repo || !branch || !message || !files?.length) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: owner, repo, branch, files, and message are required.",
+            },
+          ],
+        };
+      }
+      // Client-side safety check
+      if (branch === "main" || branch === "master") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Refused: cannot push to protected branch "${branch}". Create a feature branch first.`,
+            },
+          ],
+        };
+      }
+      try {
+        const resp = await vaultFetch(`${baseUrl}/connections/github/push`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner, repo, branch, files, message }),
+          signal,
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `GitHub push error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const data = (await resp.json()) as { sha: string };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Pushed ${files.length} file(s) to ${owner}/${repo}:${branch}\nCommit: ${data.sha.slice(0, 7)}\nMessage: ${message}`,
+            },
+          ],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   // -- vault_gcalendar_create_event -------------------------------------------
   const vaultCalendarCreateEvent: AnyAgentTool = {
     name: "vault_gcalendar_create_event",
@@ -3264,6 +3749,12 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultApproveDomain,
     vaultGmailCreateDraft,
     vaultGmailUpdateDraft,
+    vaultGitHubCreateIssue,
+    vaultGitHubListIssues,
+    vaultGitHubCreateBranch,
+    vaultGitHubCreatePR,
+    vaultGitHubListPRs,
+    vaultGitHubPush,
     vaultCalendarCreateEvent,
     vaultCalendarUpdateEvent,
     vaultCalendarDeleteEvent,
