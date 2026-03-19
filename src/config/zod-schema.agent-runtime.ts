@@ -274,7 +274,14 @@ export const ToolsWebSchema = z
   .optional();
 
 export const ToolProfileSchema = z
-  .union([z.literal("minimal"), z.literal("coding"), z.literal("messaging"), z.literal("full")])
+  .union([
+    z.literal("minimal"),
+    z.literal("coding"),
+    z.literal("messaging"),
+    z.literal("full"),
+    z.literal("chief-of-staff"),
+    z.literal("software-engineer"),
+  ])
   .optional();
 
 type AllowlistPolicy = {

@@ -87,7 +87,7 @@ export async function spawnSubagentDirect(
   const runTimeoutSeconds =
     typeof params.runTimeoutSeconds === "number" && Number.isFinite(params.runTimeoutSeconds)
       ? Math.max(0, Math.floor(params.runTimeoutSeconds))
-      : 0;
+      : 1800; // default 30 minutes
   let modelApplied = false;
 
   const cfg = loadConfig();

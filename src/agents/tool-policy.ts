@@ -1,6 +1,12 @@
 import { type AnyAgentTool, wrapOwnerOnlyToolExecution } from "./tools/common.js";
 
-export type ToolProfileId = "minimal" | "coding" | "messaging" | "full";
+export type ToolProfileId =
+  | "minimal"
+  | "coding"
+  | "messaging"
+  | "full"
+  | "chief-of-staff"
+  | "software-engineer";
 
 type ToolProfilePolicy = {
   allow?: string[];
@@ -50,6 +56,60 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "vault_agent_collection_write",
     "vault_agent_collection_list",
   ],
+  // GitHub API integration tools (REST API via vault OAuth)
+  "group:github_api": [
+    "vault_github_create_issue",
+    "vault_github_list_issues",
+    "vault_github_create_branch",
+    "vault_github_create_pr",
+    "vault_github_list_prs",
+    "vault_github_push",
+  ],
+  // Developer tools — on-disk repo execution + repo discovery
+  "group:developer": ["vault_repo_exec", "vault_repos_list"],
+  // Vault browser automation tools
+  "group:vault_browser": [
+    "vault_browser_navigate",
+    "vault_browser_snapshot",
+    "vault_browser_click",
+    "vault_browser_type",
+    "vault_browser_fill",
+    "vault_browser_select",
+    "vault_browser_hover",
+    "vault_browser_press_key",
+    "vault_browser_screenshot",
+    "vault_browser_tab_list",
+    "vault_browser_tab_new",
+    "vault_browser_tab_close",
+    "vault_browser_tabs",
+    "vault_browser_pdf",
+    "vault_browser_dialog",
+    "vault_browser_upload",
+    "vault_browser_status",
+    "vault_browser_start",
+    "vault_browser_stop",
+    "vault_browser_console",
+    "vault_browser_wait",
+    "vault_approve_domain",
+  ],
+  // Vault read-only document access
+  "group:vault_read": ["vault_search", "vault_get", "vault_status"],
+  // Vault write tools (notes, collections, artifacts)
+  "group:vault_write": [
+    "vault_note_create",
+    "vault_note_update",
+    "vault_memory_write",
+    "vault_agent_collection_create",
+    "vault_agent_collection_write",
+    "vault_agent_collection_list",
+    "vault_artifact_write",
+    "vault_artifact_list",
+    "vault_artifact_url",
+    "vault_presentation_build",
+    "vault_report_build",
+  ],
+  // Gmail integration tools
+  "group:gmail": ["vault_gmail_create_draft", "vault_gmail_update_draft"],
   // Automation + infra
   "group:automation": ["vault_cron", "gateway"],
   // Messaging surface
@@ -99,6 +159,41 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
     ],
   },
   full: {},
+  "chief-of-staff": {
+    allow: [
+      "group:vault_read",
+      "group:vault_write",
+      "group:memory",
+      "group:web",
+      "group:vault_browser",
+      "group:github_api",
+      "group:gmail",
+      "group:runtime",
+      "group:sessions",
+      "group:artifacts",
+      "group:messaging",
+      "group:automation",
+      "group:openclaw",
+      "image",
+    ],
+  },
+  "software-engineer": {
+    allow: ["group:developer", "group:github_api", "group:sessions", "image"],
+    deny: [
+      "group:vault_read",
+      "group:vault_write",
+      "group:vault_browser",
+      "group:web",
+      "group:messaging",
+      "group:memory",
+      "group:artifacts",
+      "group:automation",
+      "group:gmail",
+      "group:runtime",
+      "vault_cron",
+      "gateway",
+    ],
+  },
 };
 
 export function normalizeToolName(name: string) {

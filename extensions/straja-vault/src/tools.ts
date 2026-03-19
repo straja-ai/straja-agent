@@ -478,6 +478,57 @@ export const GitHubPushSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
+// Repos Schema
+// ---------------------------------------------------------------------------
+
+export const ReposListSchema = Type.Object({});
+
+export const RepoExecSchema = Type.Object({
+  command: Type.String({
+    description:
+      "The command to execute (e.g. 'git', 'npm', 'node', 'cargo'). " +
+      "Runs inside a sandboxed environment scoped to the repos directory with domain-filtered network access.",
+  }),
+  args: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Arguments to pass to the command (e.g. ['status', '--porcelain'] or ['run', 'build']).",
+    }),
+  ),
+  cwd: Type.String({
+    description:
+      "Working directory relative to the repos base (~/.straja/repos/). " +
+      "Must be a repo name or path within a repo (e.g. 'my-repo' or 'my-repo/src'). Required.",
+  }),
+  timeout: Type.Optional(
+    Type.Number({
+      description:
+        "Timeout in seconds. For synchronous mode: 1-300 (default: 30). " +
+        "For background mode: 1-1800 (30 min). Command is killed if it exceeds this.",
+      minimum: 1,
+      maximum: 1800,
+      default: 30,
+    }),
+  ),
+  background: Type.Optional(
+    Type.Boolean({
+      description:
+        "Run the command in background immediately and return a session ID. " +
+        "Use vault_process to interact with the running process (poll output, write stdin, kill, etc.).",
+    }),
+  ),
+  yieldMs: Type.Optional(
+    Type.Number({
+      description:
+        "Wait this many milliseconds for the command to complete. " +
+        "If still running after this time, background the command and return a session ID.",
+      minimum: 10,
+      maximum: 120000,
+    }),
+  ),
+});
+
+// ---------------------------------------------------------------------------
 // Calendar Event Schemas
 // ---------------------------------------------------------------------------
 
@@ -2957,6 +3008,165 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     },
   };
 
+  // -- vault_repos_list --------------------------------------------------------
+  const vaultReposList: AnyAgentTool = {
+    name: "vault_repos_list",
+    label: "List Repos",
+    description:
+      "List all repositories available on disk in the shared repos directory (~/.straja/repos/). " +
+      "Returns repo names, paths, and whether they have a .git directory. " +
+      "Use this to discover which repos you can work with via vault_exec.",
+    parameters: ReposListSchema,
+    async execute(_toolCallId: string, _params: Record<string, unknown>, signal?: AbortSignal) {
+      try {
+        const resp = await vaultFetch(`${baseUrl}/repos`, { signal });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Repos list error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+        const data = (await resp.json()) as {
+          repos: Array<{ name: string; path: string; hasGit: boolean }>;
+          baseDir: string;
+        };
+        if (!data.repos.length) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No repos found in ${data.baseDir}. Connect GitHub repos via the vault UI to clone them here.`,
+              },
+            ],
+          };
+        }
+        const lines = data.repos.map((r) => `${r.name}${r.hasGit ? " (git)" : ""}  →  ${r.path}`);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${data.repos.length} repo(s) in ${data.baseDir}:\n${lines.join("\n")}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_repo_exec ---------------------------------------------------------
+  const vaultRepoExec: AnyAgentTool = {
+    name: "vault_repo_exec",
+    label: "Repo Execute",
+    description:
+      "Execute a command in a sandboxed environment scoped to on-disk repos (~/.straja/repos/). " +
+      "Has real filesystem access with git, build tools, package managers, etc. " +
+      "Network access is domain-filtered (GitHub, npm registry, and configured allowlist). " +
+      "Use vault_repos_list to discover available repos first. " +
+      "The cwd parameter is required and must be a repo name or path within a repo. " +
+      "Commands that complete within 5 seconds return results immediately. " +
+      "Longer-running commands are automatically backgrounded — " +
+      "use vault_process to poll output, write stdin, or kill the process.",
+    parameters: RepoExecSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const command = String(params.command || "");
+      if (!command) {
+        return {
+          content: [{ type: "text" as const, text: "Error: command is required." }],
+        };
+      }
+      const cwd = String(params.cwd || "").trim();
+      if (!cwd) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Error: cwd is required (repo name, e.g. 'my-repo' or 'my-repo/src').",
+            },
+          ],
+        };
+      }
+
+      const payload: Record<string, unknown> = {
+        command,
+        args: (params.args as string[]) ?? [],
+        timeout: (params.timeout as number) ?? 30,
+        cwd,
+      };
+      if (params.background === true) {
+        payload.background = true;
+      }
+      if (typeof params.yieldMs === "number") {
+        payload.yieldMs = params.yieldMs;
+      } else if (params.background !== true) {
+        payload.yieldMs = 5000;
+      }
+
+      try {
+        const resp = await vaultFetch(`${baseUrl}/repo-exec`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [
+              { type: "text" as const, text: `Repo exec error (${resp.status}): ${errText}` },
+            ],
+          };
+        }
+
+        const data = (await resp.json()) as Record<string, unknown>;
+
+        // Background mode — still running after yield window
+        if (data.status === "running" && !data.output) {
+          const text =
+            `Command running in background.\n` +
+            `Session ID: ${data.sessionId}\n` +
+            `PID: ${data.pid}\n` +
+            `Use vault_process to interact (poll, log, write, kill, clear, remove).`;
+          return {
+            content: [{ type: "text" as const, text }],
+            details: data,
+          };
+        }
+
+        // Completed or yielded with partial output
+        const parts: string[] = [];
+        if (data.timedOut) {
+          parts.push("⚠ Command timed out and was killed.");
+        }
+        if (data.status === "running") {
+          parts.push(`Command still running (session: ${data.sessionId}). Partial output below.`);
+          parts.push(`Use vault_process to get remaining output.`);
+        }
+        parts.push(`Exit code: ${data.exitCode ?? "pending"}`);
+        // Yield mode returns output/tail; sync mode returns stdout/stderr
+        const stdout = String(data.stdout || data.output || "").trim();
+        const stderr = String(data.stderr || "").trim();
+        if (stdout) parts.push(`\nStdout:\n${stdout}`);
+        if (stderr) parts.push(`\nStderr:\n${stderr}`);
+
+        return {
+          content: [{ type: "text" as const, text: parts.join("\n") }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
   // -- vault_gcalendar_create_event -------------------------------------------
   const vaultCalendarCreateEvent: AnyAgentTool = {
     name: "vault_gcalendar_create_event",
@@ -3755,6 +3965,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultGitHubCreatePR,
     vaultGitHubListPRs,
     vaultGitHubPush,
+    vaultReposList,
+    vaultRepoExec,
     vaultCalendarCreateEvent,
     vaultCalendarUpdateEvent,
     vaultCalendarDeleteEvent,

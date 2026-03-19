@@ -55,11 +55,15 @@ function syncHttpPut(url: string, body: string): void {
       },
     );
     const status = Number.parseInt(statusRaw.trim().split("\n").pop() || "0", 10);
+    if (status === 423) {
+      throw new Error(`Vault is locked — unlock it before starting the agent`);
+    }
     if (!Number.isFinite(status) || status < 200 || status >= 300) {
       throw new Error(`HTTP ${status}`);
     }
   } catch (err: unknown) {
     const msg = formatVaultCurlError(err);
+    if (msg.includes("locked")) throw err;
     throw new Error(`Vault subagent-registry PUT failed: ${msg}`);
   }
 }
@@ -71,6 +75,9 @@ function createVaultSubagentRegistryOps(baseUrl: string): SubagentRegistryPatchO
     const resp = syncHttpGet(url);
     if (resp.status === 404) {
       return {};
+    }
+    if (resp.status === 423) {
+      throw new Error(`Vault is locked — unlock it before starting the agent`);
     }
     if (resp.status !== 200) {
       throw new Error(`Vault subagent-registry read failed (${resp.status})`);
