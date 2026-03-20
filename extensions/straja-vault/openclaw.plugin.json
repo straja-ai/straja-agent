@@ -13,8 +13,12 @@
         "type": "string"
       },
       "injectMemoryInPrompt": {
-        "type": "boolean",
-        "default": false
+        "type": "boolean"
+      },
+      "memoryPromptInjectionMode": {
+        "type": "string",
+        "enum": ["off", "new_sessions", "always"],
+        "default": "always"
       },
       "debugLogPrompt": {
         "type": "boolean",
@@ -34,7 +38,11 @@
     },
     "injectMemoryInPrompt": {
       "label": "Inject Memory in Prompt",
-      "help": "Inject MEMORY.md content into every LLM prompt. Useful for smaller models that don't proactively call vault_memory_search. Default: off."
+      "help": "Legacy compatibility switch. true injects memory on every prompt. Prefer Memory Prompt Injection Mode."
+    },
+    "memoryPromptInjectionMode": {
+      "label": "Memory Prompt Injection Mode",
+      "help": "Choose when vault memory is injected into prompt context: off, only for new sessions, or every prompt. Default: every prompt."
     },
     "debugLogPrompt": {
       "label": "Debug: Log LLM Prompt",

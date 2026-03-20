@@ -15,6 +15,16 @@ import {
   vaultFetch,
 } from "./src/http.js";
 import { registerLogsPatch } from "./src/logs-patch.js";
+import {
+  formatPersistentMemoryContext,
+  selectRecentDailyMemoryPaths,
+  type VaultMemoryFileEntry,
+} from "./src/memory-context.js";
+import {
+  resolveMemoryInjectionSessionKey,
+  resolveMemoryPromptInjectionMode,
+  shouldInjectMemoryForSession,
+} from "./src/memory-injection.js";
 import { registerSessionPatch } from "./src/session-patch.js";
 import { registerSessionStorePatch } from "./src/session-store-patch.js";
 import { registerSubagentRegistryPatch } from "./src/subagent-registry-patch.js";
@@ -80,9 +90,10 @@ let logsPatched = false;
 let auditPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
+const memoryInjectedSessions = new Set<string>();
 
 // ---------------------------------------------------------------------------
-// Lightweight cache for MEMORY.md content injection.
+// Lightweight cache for injected memory context.
 // Avoids hitting the vault HTTP server on every single LLM turn.
 // Cache is per-process and refreshed every 60 seconds.
 // ---------------------------------------------------------------------------
@@ -90,9 +101,43 @@ const MEMORY_CACHE_TTL_MS = 60_000;
 let memoryCacheContent: string | null = null;
 let memoryCacheTs = 0;
 
-/** Invalidate the MEMORY.md cache (e.g. after a vault_memory_write to MEMORY.md). */
+/** Invalidate the injected memory cache after writes to _memory. */
 export function invalidateMemoryCache() {
+  memoryCacheContent = null;
   memoryCacheTs = 0;
+}
+
+async function fetchMemoryFile(baseUrl: string, filePath: string): Promise<string | null> {
+  const resp = await vaultFetch(`${baseUrl}/raw/_memory/${encodeURIComponent(filePath)}`, {
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!resp.ok) {
+    return null;
+  }
+  const text = await resp.text();
+  return text.trim() || null;
+}
+
+async function fetchRecentDailyMemory(
+  baseUrl: string,
+): Promise<Array<{ path: string; content: string }>> {
+  const listResp = await vaultFetch(`${baseUrl}/collections/_memory/files`, {
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!listResp.ok) {
+    return [];
+  }
+  const files = (await listResp.json()) as VaultMemoryFileEntry[];
+  const recentPaths = selectRecentDailyMemoryPaths(files, 2);
+  const recentEntries = await Promise.all(
+    recentPaths.map(async (filePath) => {
+      const content = await fetchMemoryFile(baseUrl, filePath);
+      return content ? { path: filePath, content } : null;
+    }),
+  );
+  return recentEntries.filter((entry): entry is { path: string; content: string } =>
+    Boolean(entry),
+  );
 }
 
 async function fetchMemoryContent(baseUrl: string): Promise<string | null> {
@@ -102,20 +147,16 @@ async function fetchMemoryContent(baseUrl: string): Promise<string | null> {
   }
 
   try {
-    const resp = await vaultFetch(`${baseUrl}/raw/_memory/${encodeURIComponent("MEMORY.md")}`, {
-      signal: AbortSignal.timeout(3000),
+    const [memoryContent, recentDaily] = await Promise.all([
+      fetchMemoryFile(baseUrl, "MEMORY.md"),
+      fetchRecentDailyMemory(baseUrl),
+    ]);
+    memoryCacheContent = formatPersistentMemoryContext({
+      memoryContent,
+      recentDaily,
     });
-    if (resp.ok) {
-      const text = await resp.text();
-      const trimmed = text.trim();
-      memoryCacheContent = trimmed || null;
-      memoryCacheTs = now;
-      return memoryCacheContent;
-    }
-    // 404 or similar — no MEMORY.md yet
-    memoryCacheContent = null;
     memoryCacheTs = now;
-    return null;
+    return memoryCacheContent;
   } catch {
     // Vault unreachable — use stale cache if available, else null
     return memoryCacheContent;
@@ -187,7 +228,13 @@ const plugin = {
         injectMemoryInPrompt: {
           type: "boolean",
           description:
-            "Inject MEMORY.md content into every LLM prompt via before_prompt_build hook. Useful for smaller models that don't proactively call vault_memory_search. Default: false.",
+            "Legacy compatibility switch for memory prompt injection. true injects on every prompt. Prefer memoryPromptInjectionMode. Default behavior without either setting: inject on every prompt.",
+        },
+        memoryPromptInjectionMode: {
+          type: "string",
+          enum: ["off", "new_sessions", "always"],
+          description:
+            "Controls memory prompt injection for the vault plugin. off disables prompt injection, new_sessions injects only on the first prompt of each session, always injects on every prompt. Default: always.",
         },
         baseUrl: {
           type: "string",
@@ -220,8 +267,8 @@ const plugin = {
     // Register tools synchronously so they are available immediately.
     const tools = createVaultTools(baseUrl, {
       onMemoryWrite: (path) => {
-        // Invalidate the MEMORY.md prompt-injection cache when MEMORY.md is written
-        if (path.toLowerCase() === "memory.md") {
+        const normalized = path.trim().replace(/^\/+/, "").toLowerCase();
+        if (normalized === "memory.md" || normalized.startsWith("memory/")) {
           invalidateMemoryCache();
         }
       },
@@ -444,45 +491,69 @@ const plugin = {
     }
 
     // -----------------------------------------------------------------------
-    // before_prompt_build hook: inject MEMORY.md into the LLM context.
+    // before_prompt_build hook: inject vault memory into the LLM context.
     //
     // Many smaller models (e.g. gpt-4.1-mini) don't proactively call
     // vault_memory_search before answering identity/preference questions.
-    // By injecting MEMORY.md as prependContext, the model has persistent
-    // knowledge available in its context window from the very first turn —
-    // no tool call required.
+    // By injecting MEMORY.md plus the newest daily memory notes as
+    // prependContext, the model has memory available from the very first
+    // turn — no tool call required.
     //
-    // Controlled by pluginConfig.injectMemoryInPrompt (default: false).
-    // When bootstrap files are vault-sourced, the agent already has
-    // instructions to use vault_memory_search — this injection is redundant.
+    // Controlled by pluginConfig.memoryPromptInjectionMode.
+    // Default: always.
+    // Legacy compatibility: injectMemoryInPrompt=true injects on every prompt.
     // -----------------------------------------------------------------------
-    const injectMemoryInPrompt = api.pluginConfig?.injectMemoryInPrompt === true;
-    if (!promptHookRegistered && injectMemoryInPrompt) {
+    const initialMemoryPromptInjectionMode = resolveMemoryPromptInjectionMode(
+      api.pluginConfig as Record<string, unknown> | undefined,
+    );
+    if (!promptHookRegistered) {
       api.on(
         "before_prompt_build",
-        async (_event, _ctx) => {
+        async (_event, ctx) => {
+          const memoryPromptInjectionMode = resolveMemoryPromptInjectionMode(
+            api.pluginConfig as Record<string, unknown> | undefined,
+          );
+          const sessionKey = resolveMemoryInjectionSessionKey({
+            sessionId: ctx.sessionId,
+            sessionKey: ctx.sessionKey,
+          });
+          if (
+            !shouldInjectMemoryForSession(
+              memoryPromptInjectionMode,
+              sessionKey,
+              memoryInjectedSessions,
+            )
+          ) {
+            return;
+          }
           const memoryContent = await fetchMemoryContent(baseUrl);
           if (!memoryContent) {
             return;
           }
-          return {
-            prependContext:
-              `<persistent_memory>\n` +
-              `The following is your persistent memory from previous sessions. ` +
-              `Use this information when answering questions about your identity, ` +
-              `the user's preferences, prior decisions, or anything discussed before.\n\n` +
-              `${memoryContent}\n` +
-              `</persistent_memory>`,
-          };
+          if (sessionKey && memoryPromptInjectionMode === "new_sessions") {
+            memoryInjectedSessions.add(sessionKey);
+          }
+          return { prependContext: memoryContent };
         },
         { priority: 10 },
       );
-      promptHookRegistered = true;
-      api.logger.info("Memory context injection hook registered (before_prompt_build → MEMORY.md)");
-    } else if (!promptHookRegistered) {
+      api.on("before_reset", async (_event, ctx) => {
+        const sessionKey = resolveMemoryInjectionSessionKey({
+          sessionId: ctx.sessionId,
+          sessionKey: ctx.sessionKey,
+        });
+        if (sessionKey) {
+          memoryInjectedSessions.delete(sessionKey);
+        }
+      });
+      api.on("session_end", async (event) => {
+        if (event.sessionId?.trim()) {
+          memoryInjectedSessions.delete(`session:${event.sessionId.trim()}`);
+        }
+      });
       promptHookRegistered = true;
       api.logger.info(
-        "Memory prompt injection disabled (injectMemoryInPrompt: false). Agent uses vault_memory_search instead.",
+        `Memory context injection hook registered (default mode: ${initialMemoryPromptInjectionMode})`,
       );
     }
 

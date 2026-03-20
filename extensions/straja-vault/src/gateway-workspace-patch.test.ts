@@ -36,6 +36,9 @@ describe("gateway-workspace-patch", () => {
     expect(typeof ops!.statFile).toBe("function");
     expect(typeof ops!.readFile).toBe("function");
     expect(typeof ops!.writeFile).toBe("function");
+    expect(typeof ops!.statFileInCollection).toBe("function");
+    expect(typeof ops!.readFileInCollection).toBe("function");
+    expect(typeof ops!.writeFileInCollection).toBe("function");
   });
 
   it("resolveGatewayWorkspaceOps returns undefined when not registered", () => {
@@ -76,7 +79,7 @@ describe("gateway-workspace-patch", () => {
       registerGatewayWorkspacePatch(BASE_URL);
       const ops = resolveGatewayWorkspaceOps()!;
 
-      await expect(ops.statFile("SOUL.md")).rejects.toThrow("Vault workspace stat failed: 500");
+      await expect(ops.statFile("SOUL.md")).rejects.toThrow("Vault _workspace stat failed: 500");
     });
   });
 
@@ -111,7 +114,21 @@ describe("gateway-workspace-patch", () => {
       registerGatewayWorkspacePatch(BASE_URL);
       const ops = resolveGatewayWorkspaceOps()!;
 
-      await expect(ops.readFile("SOUL.md")).rejects.toThrow("Vault workspace read failed: 500");
+      await expect(ops.readFile("SOUL.md")).rejects.toThrow("Vault _workspace read failed: 500");
+    });
+
+    it("reads MEMORY.md from _memory when requested explicitly", async () => {
+      fetchMock.mockResolvedValue(new Response("# Memory\nFacts", { status: 200 }));
+      registerGatewayWorkspacePatch(BASE_URL);
+      const ops = resolveGatewayWorkspaceOps()!;
+
+      const content = await ops.readFileInCollection!("_memory", "MEMORY.md");
+
+      expect(content).toBe("# Memory\nFacts");
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${BASE_URL}/raw/_memory/MEMORY.md`,
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
     });
   });
 
@@ -127,7 +144,7 @@ describe("gateway-workspace-patch", () => {
         `${BASE_URL}/raw/_workspace/SOUL.md`,
         expect.objectContaining({
           method: "PUT",
-          headers: { "Content-Type": "text/plain" },
+          headers: expect.any(Headers),
           body: "# Updated Soul",
           signal: expect.any(AbortSignal),
         }),
@@ -142,7 +159,25 @@ describe("gateway-workspace-patch", () => {
       const ops = resolveGatewayWorkspaceOps()!;
 
       await expect(ops.writeFile("SOUL.md", "content")).rejects.toThrow(
-        "Vault workspace write failed: 500",
+        "Vault _workspace write failed: 500",
+      );
+    });
+
+    it("writes MEMORY.md into _memory when requested explicitly", async () => {
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      registerGatewayWorkspacePatch(BASE_URL);
+      const ops = resolveGatewayWorkspaceOps()!;
+
+      await ops.writeFileInCollection!("_memory", "MEMORY.md", "# Memory");
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${BASE_URL}/raw/_memory/MEMORY.md`,
+        expect.objectContaining({
+          method: "PUT",
+          headers: expect.any(Headers),
+          body: "# Memory",
+          signal: expect.any(AbortSignal),
+        }),
       );
     });
   });

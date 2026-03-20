@@ -66,6 +66,19 @@ type GatewayWorkspaceOps = {
   statFile(filename: string): Promise<FileMeta | null>;
   readFile(filename: string): Promise<string | null>;
   writeFile(filename: string, content: string): Promise<void>;
+  statFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+  ): Promise<FileMeta | null>;
+  readFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+  ): Promise<string | null>;
+  writeFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+    content: string,
+  ): Promise<void>;
 };
 
 function resolveVaultOps(): GatewayWorkspaceOps | undefined {
@@ -75,6 +88,59 @@ function resolveVaultOps(): GatewayWorkspaceOps | undefined {
 }
 
 const ALLOWED_FILE_NAMES = new Set<string>([...BOOTSTRAP_FILE_NAMES, ...MEMORY_FILE_NAMES]);
+
+function collectionForAgentFileName(name: string): "_workspace" | "_memory" {
+  return MEMORY_FILE_NAMES.includes(name as (typeof MEMORY_FILE_NAMES)[number])
+    ? "_memory"
+    : "_workspace";
+}
+
+async function statVaultFile(filename: string): Promise<FileMeta | null> {
+  const vaultOps = resolveVaultOps();
+  if (!vaultOps) {
+    return null;
+  }
+  const collection = collectionForAgentFileName(filename);
+  if (vaultOps.statFileInCollection) {
+    return await vaultOps.statFileInCollection(collection, filename);
+  }
+  if (collection === "_workspace") {
+    return await vaultOps.statFile(filename);
+  }
+  throw new Error("Vault workspace patch does not support _memory files");
+}
+
+async function readVaultFile(filename: string): Promise<string | null> {
+  const vaultOps = resolveVaultOps();
+  if (!vaultOps) {
+    return null;
+  }
+  const collection = collectionForAgentFileName(filename);
+  if (vaultOps.readFileInCollection) {
+    return await vaultOps.readFileInCollection(collection, filename);
+  }
+  if (collection === "_workspace") {
+    return await vaultOps.readFile(filename);
+  }
+  throw new Error("Vault workspace patch does not support _memory files");
+}
+
+async function writeVaultFile(filename: string, content: string): Promise<void> {
+  const vaultOps = resolveVaultOps();
+  if (!vaultOps) {
+    return;
+  }
+  const collection = collectionForAgentFileName(filename);
+  if (vaultOps.writeFileInCollection) {
+    await vaultOps.writeFileInCollection(collection, filename, content);
+    return;
+  }
+  if (collection === "_workspace") {
+    await vaultOps.writeFile(filename, content);
+    return;
+  }
+  throw new Error("Vault workspace patch does not support _memory files");
+}
 
 function resolveAgentWorkspaceFileOrRespondError(
   params: Record<string, unknown>,
@@ -113,10 +179,9 @@ type FileMeta = {
 };
 
 async function statFile(filePath: string): Promise<FileMeta | null> {
-  const vaultOps = resolveVaultOps();
-  if (vaultOps) {
+  if (resolveVaultOps()) {
     const filename = path.basename(filePath);
-    return vaultOps.statFile(filename);
+    return statVaultFile(filename);
   }
   try {
     const stat = await fs.stat(filePath);
@@ -486,9 +551,8 @@ export const agentsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const vaultOps = resolveVaultOps();
-    const content = vaultOps
-      ? ((await vaultOps.readFile(name)) ?? "")
+    const content = resolveVaultOps()
+      ? ((await readVaultFile(name)) ?? "")
       : await fs.readFile(filePath, "utf-8");
     respond(
       true,
@@ -528,9 +592,8 @@ export const agentsHandlers: GatewayRequestHandlers = {
     const { agentId, workspaceDir, name } = resolved;
     const filePath = path.join(workspaceDir, name);
     const content = String(params.content ?? "");
-    const vaultOps = resolveVaultOps();
-    if (vaultOps) {
-      await vaultOps.writeFile(name, content);
+    if (resolveVaultOps()) {
+      await writeVaultFile(name, content);
     } else {
       await fs.mkdir(workspaceDir, { recursive: true });
       await fs.writeFile(filePath, content, "utf-8");

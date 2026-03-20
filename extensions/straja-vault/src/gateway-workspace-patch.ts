@@ -12,7 +12,9 @@
 
 import { vaultFetch } from "./http.js";
 
-const COLLECTION = "_workspace";
+const WORKSPACE_COLLECTION = "_workspace";
+const MEMORY_COLLECTION = "_memory";
+type VaultCollection = typeof WORKSPACE_COLLECTION | typeof MEMORY_COLLECTION;
 
 /** Well-known Symbol used to pass the workspace file ops from plugin → gateway. */
 export const GATEWAY_WORKSPACE_PATCH_KEY = Symbol.for("openclaw.gatewayWorkspacePatchCallback");
@@ -26,6 +28,16 @@ export interface GatewayWorkspaceOps {
   statFile(filename: string): Promise<VaultFileMeta | null>;
   readFile(filename: string): Promise<string | null>;
   writeFile(filename: string, content: string): Promise<void>;
+  statFileInCollection?(
+    collection: VaultCollection,
+    filename: string,
+  ): Promise<VaultFileMeta | null>;
+  readFileInCollection?(collection: VaultCollection, filename: string): Promise<string | null>;
+  writeFileInCollection?(
+    collection: VaultCollection,
+    filename: string,
+    content: string,
+  ): Promise<void>;
 }
 
 /**
@@ -34,8 +46,16 @@ export interface GatewayWorkspaceOps {
  * Uses GET (vault doesn't support HEAD on /raw/) and computes size from body.
  * Returns metadata on 200, null on 404. Throws on vault errors.
  */
-async function vaultStatFile(baseUrl: string, filename: string): Promise<VaultFileMeta | null> {
-  const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
+function rawUrl(baseUrl: string, collection: VaultCollection, filename: string): string {
+  return `${baseUrl}/raw/${collection}/${encodeURIComponent(filename)}`;
+}
+
+async function vaultStatFile(
+  baseUrl: string,
+  collection: VaultCollection,
+  filename: string,
+): Promise<VaultFileMeta | null> {
+  const url = rawUrl(baseUrl, collection, filename);
   const resp = await vaultFetch(url, {
     signal: AbortSignal.timeout(3000),
   });
@@ -52,7 +72,9 @@ async function vaultStatFile(baseUrl: string, filename: string): Promise<VaultFi
     return null;
   }
 
-  throw new Error(`Vault workspace stat failed: ${resp.status} ${resp.statusText} for ${filename}`);
+  throw new Error(
+    `Vault ${collection} stat failed: ${resp.status} ${resp.statusText} for ${filename}`,
+  );
 }
 
 /**
@@ -60,8 +82,12 @@ async function vaultStatFile(baseUrl: string, filename: string): Promise<VaultFi
  *
  * Returns content string on 200, null on 404. Throws on vault errors.
  */
-async function vaultReadFile(baseUrl: string, filename: string): Promise<string | null> {
-  const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
+async function vaultReadFile(
+  baseUrl: string,
+  collection: VaultCollection,
+  filename: string,
+): Promise<string | null> {
+  const url = rawUrl(baseUrl, collection, filename);
   const resp = await vaultFetch(url, {
     signal: AbortSignal.timeout(3000),
   });
@@ -74,7 +100,9 @@ async function vaultReadFile(baseUrl: string, filename: string): Promise<string 
     return null;
   }
 
-  throw new Error(`Vault workspace read failed: ${resp.status} ${resp.statusText} for ${filename}`);
+  throw new Error(
+    `Vault ${collection} read failed: ${resp.status} ${resp.statusText} for ${filename}`,
+  );
 }
 
 /**
@@ -82,8 +110,13 @@ async function vaultReadFile(baseUrl: string, filename: string): Promise<string 
  *
  * Uses PUT. Throws on vault errors — no silent failures.
  */
-async function vaultWriteFile(baseUrl: string, filename: string, content: string): Promise<void> {
-  const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(filename)}`;
+async function vaultWriteFile(
+  baseUrl: string,
+  collection: VaultCollection,
+  filename: string,
+  content: string,
+): Promise<void> {
+  const url = rawUrl(baseUrl, collection, filename);
   const resp = await vaultFetch(url, {
     method: "PUT",
     headers: { "Content-Type": "text/plain" },
@@ -93,7 +126,7 @@ async function vaultWriteFile(baseUrl: string, filename: string, content: string
 
   if (!resp.ok) {
     throw new Error(
-      `Vault workspace write failed: ${resp.status} ${resp.statusText} for ${filename}`,
+      `Vault ${collection} write failed: ${resp.status} ${resp.statusText} for ${filename}`,
     );
   }
 }
@@ -113,9 +146,16 @@ export function registerGatewayWorkspacePatch(baseUrl: string): void {
   const g = globalThis as Record<symbol, unknown>;
 
   const ops: GatewayWorkspaceOps = {
-    statFile: (filename: string) => vaultStatFile(baseUrl, filename),
-    readFile: (filename: string) => vaultReadFile(baseUrl, filename),
-    writeFile: (filename: string, content: string) => vaultWriteFile(baseUrl, filename, content),
+    statFile: (filename: string) => vaultStatFile(baseUrl, WORKSPACE_COLLECTION, filename),
+    readFile: (filename: string) => vaultReadFile(baseUrl, WORKSPACE_COLLECTION, filename),
+    writeFile: (filename: string, content: string) =>
+      vaultWriteFile(baseUrl, WORKSPACE_COLLECTION, filename, content),
+    statFileInCollection: (collection: VaultCollection, filename: string) =>
+      vaultStatFile(baseUrl, collection, filename),
+    readFileInCollection: (collection: VaultCollection, filename: string) =>
+      vaultReadFile(baseUrl, collection, filename),
+    writeFileInCollection: (collection: VaultCollection, filename: string, content: string) =>
+      vaultWriteFile(baseUrl, collection, filename, content),
   };
 
   g[GATEWAY_WORKSPACE_PATCH_KEY] = (): GatewayWorkspaceOps => ops;

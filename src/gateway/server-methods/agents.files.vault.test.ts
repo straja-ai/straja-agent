@@ -6,6 +6,19 @@ type GatewayWorkspaceOps = {
   statFile(filename: string): Promise<{ size: number; updatedAtMs: number } | null>;
   readFile(filename: string): Promise<string | null>;
   writeFile(filename: string, content: string): Promise<void>;
+  statFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+  ): Promise<{ size: number; updatedAtMs: number } | null>;
+  readFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+  ): Promise<string | null>;
+  writeFileInCollection?(
+    collection: "_workspace" | "_memory",
+    filename: string,
+    content: string,
+  ): Promise<void>;
 };
 
 /**
@@ -27,6 +40,9 @@ describe("agents.ts vault integration", () => {
       statFile: vi.fn(),
       readFile: vi.fn(),
       writeFile: vi.fn(),
+      statFileInCollection: vi.fn(),
+      readFileInCollection: vi.fn(),
+      writeFileInCollection: vi.fn(),
     };
     (globalThis as Record<symbol, unknown>)[GATEWAY_WORKSPACE_PATCH_KEY] = () => mockOps;
   });
@@ -138,6 +154,21 @@ describe("agents.ts vault integration", () => {
 
       await expect(ops.readFile("SOUL.md")).rejects.toThrow("Vault connection refused");
     });
+
+    it("can route MEMORY.md reads through _memory", async () => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const readFileInCollection = mockOps.readFileInCollection as ReturnType<typeof vi.fn>;
+      readFileInCollection.mockResolvedValue("# Memory");
+
+      const factory = (globalThis as Record<symbol, unknown>)[
+        GATEWAY_WORKSPACE_PATCH_KEY
+      ] as () => GatewayWorkspaceOps;
+      const ops = factory();
+      const content = await ops.readFileInCollection?.("_memory", "MEMORY.md");
+
+      expect(content).toBe("# Memory");
+      expect(readFileInCollection).toHaveBeenCalledWith("_memory", "MEMORY.md");
+    });
   });
 
   describe("writeFile (agents.files.set) via vault", () => {
@@ -178,6 +209,20 @@ describe("agents.ts vault integration", () => {
 
       // eslint-disable-next-line @typescript-eslint/unbound-method
       expect(mockOps.writeFile).toHaveBeenCalledWith("SOUL.md", "");
+    });
+
+    it("can route MEMORY.md writes through _memory", async () => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const writeFileInCollection = mockOps.writeFileInCollection as ReturnType<typeof vi.fn>;
+      writeFileInCollection.mockResolvedValue(undefined);
+
+      const factory = (globalThis as Record<symbol, unknown>)[
+        GATEWAY_WORKSPACE_PATCH_KEY
+      ] as () => GatewayWorkspaceOps;
+      const ops = factory();
+      await ops.writeFileInCollection?.("_memory", "MEMORY.md", "# Facts");
+
+      expect(writeFileInCollection).toHaveBeenCalledWith("_memory", "MEMORY.md", "# Facts");
     });
   });
 
