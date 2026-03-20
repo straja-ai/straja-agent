@@ -869,6 +869,12 @@ type ArtifactItem = {
   isBinary: boolean;
 };
 
+function normalizeEditableArtifactPath(value: string): string {
+  return String(value || "")
+    .trim()
+    .replace(/^_?editable\//i, "");
+}
+
 export type VaultToolsOptions = {
   onMemoryWrite?: (path: string) => void;
 };
@@ -1546,7 +1552,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "and keep context small.",
     parameters: VaultMemoryGetSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
-      const path = String(params.path || "");
+      const path = normalizeEditableArtifactPath(String(params.path || ""));
       if (!path) {
         return { content: [{ type: "text" as const, text: "Error: path is required." }] };
       }
@@ -2117,7 +2123,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       '- path: "data/chart.png", content: "<base64>", encoding: "base64", mimeType: "image/png"',
     parameters: VaultArtifactWriteSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
-      const path = String(params.path || "");
+      const path = normalizeEditableArtifactPath(String(params.path || ""));
       const content = String(params.content ?? "");
       const encoding = String(params.encoding || "utf8");
       const mimeType = params.mimeType ? String(params.mimeType) : undefined;
@@ -2133,7 +2139,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         const encodedPath = encodeURIComponent(path);
         if (encoding === "base64") {
           // Write binary artifacts through the raw endpoint; the vault stores them as binary blobs.
-          const resp = await vaultFetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+          const resp = await vaultFetch(`${baseUrl}/raw/_editable/${encodedPath}`, {
             method: "PUT",
             headers: {
               "Content-Type": "application/octet-stream",
@@ -2161,7 +2167,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         }
 
         // Text content — write directly through raw endpoint
-        const resp = await vaultFetch(`${baseUrl}/raw/editable/${encodedPath}`, {
+        const resp = await vaultFetch(`${baseUrl}/raw/_editable/${encodedPath}`, {
           method: "PUT",
           body: content,
           signal,
@@ -2202,7 +2208,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "- omit prefix → list all artifacts",
     parameters: VaultArtifactListSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
-      const prefix = String(params.prefix || "");
+      const prefix = normalizeEditableArtifactPath(String(params.prefix || ""));
 
       try {
         const url = prefix
@@ -2439,7 +2445,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "The framework will automatically download the file and deliver it as a Telegram document.",
     parameters: VaultArtifactUrlSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
-      const path = String(params.path || "");
+      const path = normalizeEditableArtifactPath(String(params.path || ""));
       if (!path) {
         return { content: [{ type: "text" as const, text: "Error: path is required." }] };
       }
