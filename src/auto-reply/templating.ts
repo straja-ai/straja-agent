@@ -103,6 +103,8 @@ export type MsgContext = {
   GroupSystemPrompt?: string;
   /** Untrusted metadata that must not be treated as system instructions. */
   UntrustedContext?: string[];
+  /** Trusted operational instructions injected for the current inbound message. */
+  FlowContext?: string[];
   /** Explicit owner allowlist overrides (trusted, configuration-derived). */
   OwnerAllowFrom?: Array<string | number>;
   SenderName?: string;

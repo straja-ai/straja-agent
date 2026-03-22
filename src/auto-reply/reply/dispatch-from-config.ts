@@ -15,6 +15,7 @@ import { getReplyFromConfig } from "../reply.js";
 import type { FinalizedMsgContext } from "../templating.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { formatAbortReplyText, tryFastAbortFromMessage } from "./abort.js";
+import { finalizeInboundContext } from "./inbound-context.js";
 import { shouldSkipDuplicateInbound } from "./inbound-dedupe.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
@@ -78,6 +79,7 @@ const resolveSessionTtsAuto = (
 export type DispatchFromConfigResult = {
   queuedFinal: boolean;
   counts: Record<ReplyDispatchKind, number>;
+  inboundPrependContext?: string;
 };
 
 export async function dispatchReplyFromConfig(params: {
@@ -86,8 +88,11 @@ export async function dispatchReplyFromConfig(params: {
   dispatcher: ReplyDispatcher;
   replyOptions?: Omit<GetReplyOptions, "onToolResult" | "onBlockReply">;
   replyResolver?: typeof getReplyFromConfig;
+  prependContextOverride?: string;
+  skipBeforeInboundDispatchHooks?: boolean;
 }): Promise<DispatchFromConfigResult> {
   const { ctx, cfg, dispatcher } = params;
+  let dispatchCtx = ctx;
   const diagnosticsEnabled = isDiagnosticsEnabled(cfg);
   const channel = String(ctx.Surface ?? ctx.Provider ?? "unknown").toLowerCase();
   const chatId = ctx.To ?? ctx.From;
@@ -165,6 +170,61 @@ export async function dispatchReplyFromConfig(params: {
           : "";
   const channelId = (ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase();
   const conversationId = ctx.OriginatingTo ?? ctx.To ?? ctx.From ?? undefined;
+  const agentId = sessionKey ? resolveSessionAgentId({ sessionKey, config: cfg }) : undefined;
+
+  const inboundDispatchResult =
+    !params.skipBeforeInboundDispatchHooks &&
+    !params.prependContextOverride &&
+    hookRunner?.hasHooks("before_inbound_dispatch")
+      ? await hookRunner
+          .runBeforeInboundDispatch(
+            {
+              from: ctx.From ?? "",
+              content,
+              timestamp,
+              metadata: {
+                to: ctx.To,
+                provider: ctx.Provider,
+                surface: ctx.Surface,
+                threadId: ctx.MessageThreadId,
+                originatingChannel: ctx.OriginatingChannel,
+                originatingTo: ctx.OriginatingTo,
+                messageId: messageIdForHook,
+                senderId: ctx.SenderId,
+                senderName: ctx.SenderName,
+                senderUsername: ctx.SenderUsername,
+                senderE164: ctx.SenderE164,
+              },
+            },
+            {
+              channelId,
+              accountId: ctx.AccountId,
+              conversationId,
+              sessionKey,
+              agentId,
+            },
+          )
+          .catch((err) => {
+            logVerbose(`dispatch-from-config: before_inbound_dispatch hook failed: ${String(err)}`);
+            return undefined;
+          })
+      : undefined;
+  const inboundPrependContext =
+    params.prependContextOverride?.trim() || inboundDispatchResult?.prependContext?.trim();
+  if (inboundDispatchResult?.cancel) {
+    markIdle("before_inbound_dispatch_cancel");
+    recordProcessed("skipped", { reason: "before_inbound_dispatch_cancel" });
+    return { queuedFinal: false, counts: dispatcher.getQueuedCounts(), inboundPrependContext };
+  }
+  if (inboundPrependContext) {
+    dispatchCtx = finalizeInboundContext({
+      ...ctx,
+      FlowContext: [
+        ...(Array.isArray(ctx.FlowContext) ? ctx.FlowContext : []),
+        inboundPrependContext,
+      ],
+    });
+  }
 
   // Trigger plugin hooks (fire-and-forget)
   if (hookRunner?.hasHooks("message_received")) {
@@ -233,9 +293,9 @@ export async function dispatchReplyFromConfig(params: {
   // flow when the provider handles its own messages.
   //
   // Debug: `pnpm test src/auto-reply/reply/dispatch-from-config.test.ts`
-  const originatingChannel = ctx.OriginatingChannel;
-  const originatingTo = ctx.OriginatingTo;
-  const currentSurface = (ctx.Surface ?? ctx.Provider)?.toLowerCase();
+  const originatingChannel = dispatchCtx.OriginatingChannel;
+  const originatingTo = dispatchCtx.OriginatingTo;
+  const currentSurface = (dispatchCtx.Surface ?? dispatchCtx.Provider)?.toLowerCase();
   const shouldRouteToOriginating =
     isRoutableChannel(originatingChannel) && originatingTo && originatingChannel !== currentSurface;
   const ttsChannel = shouldRouteToOriginating ? originatingChannel : currentSurface;
@@ -320,7 +380,8 @@ export async function dispatchReplyFromConfig(params: {
     let accumulatedBlockText = "";
     let blockCount = 0;
 
-    const shouldSendToolSummaries = ctx.ChatType !== "group" && ctx.CommandSource !== "native";
+    const shouldSendToolSummaries =
+      dispatchCtx.ChatType !== "group" && dispatchCtx.CommandSource !== "native";
 
     const resolveToolDeliveryPayload = (payload: ReplyPayload): ReplyPayload | null => {
       if (shouldSendToolSummaries) {
@@ -336,7 +397,7 @@ export async function dispatchReplyFromConfig(params: {
     };
 
     const replyResult = await (params.replyResolver ?? getReplyFromConfig)(
-      ctx,
+      dispatchCtx,
       {
         ...params.replyOptions,
         onToolResult: (payload: ReplyPayload) => {
@@ -490,7 +551,7 @@ export async function dispatchReplyFromConfig(params: {
     counts.final += routedFinalCount;
     recordProcessed("completed");
     markIdle("message_completed");
-    return { queuedFinal, counts };
+    return { queuedFinal, counts, inboundPrependContext };
   } catch (err) {
     recordProcessed("error", { error: String(err) });
     markIdle("message_error");

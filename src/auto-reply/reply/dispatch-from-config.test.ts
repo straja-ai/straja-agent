@@ -23,6 +23,7 @@ const diagnosticMocks = vi.hoisted(() => ({
 const hookMocks = vi.hoisted(() => ({
   runner: {
     hasHooks: vi.fn(() => false),
+    runBeforeInboundDispatch: vi.fn(async () => undefined),
     runMessageReceived: vi.fn(async () => {}),
   },
 }));
@@ -112,6 +113,7 @@ describe("dispatchReplyFromConfig", () => {
     diagnosticMocks.logSessionStateChange.mockReset();
     hookMocks.runner.hasHooks.mockReset();
     hookMocks.runner.hasHooks.mockReturnValue(false);
+    hookMocks.runner.runBeforeInboundDispatch.mockReset();
     hookMocks.runner.runMessageReceived.mockReset();
     internalHookMocks.createInternalHookEvent.mockReset();
     internalHookMocks.createInternalHookEvent.mockImplementation(createInternalHookEventPayload);
@@ -433,6 +435,36 @@ describe("dispatchReplyFromConfig", () => {
         conversationId: "telegram:999",
       }),
     );
+  });
+
+  it("prepends flow context from before_inbound_dispatch into the reply run", async () => {
+    setNoAbort();
+    hookMocks.runner.hasHooks.mockImplementation(
+      (name: string) => name === "before_inbound_dispatch",
+    );
+    hookMocks.runner.runBeforeInboundDispatch.mockResolvedValue({
+      prependContext: "<flow>Reply with the automation policy.</flow>",
+    });
+    const cfg = emptyConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      Body: "original body",
+      BodyForAgent: "original body",
+      CommandBody: "original body",
+      RawBody: "original body",
+    });
+
+    const replyResolver = vi.fn(async (nextCtx: MsgContext) => {
+      expect(nextCtx.FlowContext).toEqual(["<flow>Reply with the automation policy.</flow>"]);
+      return { text: "hi" } satisfies ReplyPayload;
+    });
+
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(hookMocks.runner.runBeforeInboundDispatch).toHaveBeenCalled();
+    expect(replyResolver).toHaveBeenCalledTimes(1);
   });
 
   it("emits internal message:received hook when a session key is available", async () => {

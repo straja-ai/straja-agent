@@ -13,6 +13,8 @@ import type {
   PluginHookAgentEndEvent,
   PluginHookBeforeAgentStartEvent,
   PluginHookBeforeAgentStartResult,
+  PluginHookBeforeInboundDispatchEvent,
+  PluginHookBeforeInboundDispatchResult,
   PluginHookBeforeModelResolveEvent,
   PluginHookBeforeModelResolveResult,
   PluginHookBeforePromptBuildEvent,
@@ -26,6 +28,7 @@ import type {
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
   PluginHookGatewayStopEvent,
+  PluginHookInboundContext,
   PluginHookMessageContext,
   PluginHookMessageReceivedEvent,
   PluginHookMessageSendingEvent,
@@ -49,6 +52,8 @@ export type {
   PluginHookAgentContext,
   PluginHookBeforeAgentStartEvent,
   PluginHookBeforeAgentStartResult,
+  PluginHookBeforeInboundDispatchEvent,
+  PluginHookBeforeInboundDispatchResult,
   PluginHookBeforeModelResolveEvent,
   PluginHookBeforeModelResolveResult,
   PluginHookBeforePromptBuildEvent,
@@ -79,6 +84,7 @@ export type {
   PluginHookGatewayContext,
   PluginHookGatewayStartEvent,
   PluginHookGatewayStopEvent,
+  PluginHookInboundContext,
 };
 
 export type HookRunnerLogger = {
@@ -130,6 +136,17 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
       acc?.prependContext && next.prependContext
         ? `${acc.prependContext}\n\n${next.prependContext}`
         : (next.prependContext ?? acc?.prependContext),
+  });
+
+  const mergeBeforeInboundDispatch = (
+    acc: PluginHookBeforeInboundDispatchResult | undefined,
+    next: PluginHookBeforeInboundDispatchResult,
+  ): PluginHookBeforeInboundDispatchResult => ({
+    prependContext:
+      acc?.prependContext && next.prependContext
+        ? `${acc.prependContext}\n\n${next.prependContext}`
+        : (next.prependContext ?? acc?.prependContext),
+    cancel: acc?.cancel === true || next.cancel === true,
   });
 
   /**
@@ -261,6 +278,22 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
         ...mergeBeforePromptBuild(acc, next),
         ...mergeBeforeModelResolve(acc, next),
       }),
+    );
+  }
+
+  /**
+   * Run before_inbound_dispatch hook.
+   * Allows plugins to inject trusted flow context before the normal reply run.
+   */
+  async function runBeforeInboundDispatch(
+    event: PluginHookBeforeInboundDispatchEvent,
+    ctx: PluginHookInboundContext,
+  ): Promise<PluginHookBeforeInboundDispatchResult | undefined> {
+    return runModifyingHook<"before_inbound_dispatch", PluginHookBeforeInboundDispatchResult>(
+      "before_inbound_dispatch",
+      event,
+      ctx,
+      mergeBeforeInboundDispatch,
     );
   }
 
@@ -619,6 +652,7 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
     runBeforeModelResolve,
     runBeforePromptBuild,
     runBeforeAgentStart,
+    runBeforeInboundDispatch,
     runLlmInput,
     runLlmOutput,
     runAgentEnd,

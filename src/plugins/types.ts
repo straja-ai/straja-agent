@@ -299,6 +299,7 @@ export type PluginHookName =
   | "before_model_resolve"
   | "before_prompt_build"
   | "before_agent_start"
+  | "before_inbound_dispatch"
   | "llm_input"
   | "llm_output"
   | "agent_end"
@@ -436,12 +437,30 @@ export type PluginHookMessageContext = {
   conversationId?: string;
 };
 
+export type PluginHookInboundContext = PluginHookMessageContext & {
+  sessionKey?: string;
+  agentId?: string;
+};
+
 // message_received hook
 export type PluginHookMessageReceivedEvent = {
   from: string;
   content: string;
   timestamp?: number;
   metadata?: Record<string, unknown>;
+};
+
+// before_inbound_dispatch hook
+export type PluginHookBeforeInboundDispatchEvent = {
+  from: string;
+  content: string;
+  timestamp?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type PluginHookBeforeInboundDispatchResult = {
+  prependContext?: string;
+  cancel?: boolean;
 };
 
 // message_sending hook
@@ -579,6 +598,13 @@ export type PluginHookHandlerMap = {
     event: PluginHookBeforeAgentStartEvent,
     ctx: PluginHookAgentContext,
   ) => Promise<PluginHookBeforeAgentStartResult | void> | PluginHookBeforeAgentStartResult | void;
+  before_inbound_dispatch: (
+    event: PluginHookBeforeInboundDispatchEvent,
+    ctx: PluginHookInboundContext,
+  ) =>
+    | Promise<PluginHookBeforeInboundDispatchResult | void>
+    | PluginHookBeforeInboundDispatchResult
+    | void;
   llm_input: (event: PluginHookLlmInputEvent, ctx: PluginHookAgentContext) => Promise<void> | void;
   llm_output: (
     event: PluginHookLlmOutputEvent,

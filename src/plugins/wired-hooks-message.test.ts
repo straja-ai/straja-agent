@@ -39,6 +39,39 @@ describe("message_sending hook runner", () => {
   });
 });
 
+describe("before_inbound_dispatch hook runner", () => {
+  it("merges prependContext from multiple handlers and preserves cancel=false", async () => {
+    const first = vi.fn().mockReturnValue({ prependContext: "flow one" });
+    const second = vi.fn().mockReturnValue({ prependContext: "flow two" });
+    const registry = createMockPluginRegistry([
+      { hookName: "before_inbound_dispatch", handler: first },
+      { hookName: "before_inbound_dispatch", handler: second },
+    ]);
+    const runner = createHookRunner(registry);
+
+    const result = await runner.runBeforeInboundDispatch(
+      { from: "+49123", content: "test" },
+      { channelId: "whatsapp", conversationId: "+49123" },
+    );
+
+    expect(result).toEqual({ prependContext: "flow one\n\nflow two", cancel: false });
+  });
+
+  it("propagates cancel when any handler requests it", async () => {
+    const registry = createMockPluginRegistry([
+      { hookName: "before_inbound_dispatch", handler: vi.fn().mockReturnValue({ cancel: true }) },
+    ]);
+    const runner = createHookRunner(registry);
+
+    const result = await runner.runBeforeInboundDispatch(
+      { from: "+49123", content: "test" },
+      { channelId: "whatsapp", conversationId: "+49123" },
+    );
+
+    expect(result?.cancel).toBe(true);
+  });
+});
+
 describe("message_sent hook runner", () => {
   it("runMessageSent invokes registered hooks with success=true", async () => {
     const handler = vi.fn();

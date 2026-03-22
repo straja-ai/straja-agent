@@ -1,3 +1,8 @@
+import {
+  getFlowTestContext,
+  recordFlowTestVaultMutation,
+} from "../../../src/auto-reply/flow-test-context.js";
+
 const VAULT_AUTH_TOKEN_KEY = Symbol.for("openclaw.vaultAuthToken");
 const CURL_EXIT_REASONS = new Map<number, string>([
   [6, "could not resolve host"],
@@ -54,7 +59,160 @@ export function withVaultAuthRequestInit(init: RequestInit = {}): RequestInit {
   };
 }
 
+function previewRequestBody(body: BodyInit | null | undefined): {
+  preview?: string;
+  bytes?: number;
+} {
+  if (body == null) {
+    return {};
+  }
+  if (typeof body === "string") {
+    return {
+      preview: body.slice(0, 1000),
+      bytes: Buffer.byteLength(body),
+    };
+  }
+  if (body instanceof URLSearchParams) {
+    const value = body.toString();
+    return {
+      preview: value.slice(0, 1000),
+      bytes: Buffer.byteLength(value),
+    };
+  }
+  if (body instanceof Uint8Array || Buffer.isBuffer(body)) {
+    return {
+      preview: `[binary ${body.byteLength} bytes]`,
+      bytes: body.byteLength,
+    };
+  }
+  return {
+    preview: `[${Object.prototype.toString.call(body)}]`,
+  };
+}
+
+function mockVaultMutationResponse(input: string | URL, init: RequestInit): Response {
+  const url = new URL(String(input));
+  const pathname = url.pathname;
+  const bodyText =
+    typeof init.body === "string"
+      ? init.body
+      : init.body instanceof URLSearchParams
+        ? init.body.toString()
+        : "";
+
+  if (pathname === "/embed") {
+    return new Response(JSON.stringify({ ok: true, dryRun: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (pathname === "/notes") {
+    let parsed: { title?: string; content?: string } = {};
+    try {
+      parsed = bodyText ? (JSON.parse(bodyText) as typeof parsed) : {};
+    } catch {}
+    return new Response(
+      JSON.stringify({
+        path: "dry-run-note.md",
+        title: parsed.title ?? "Dry run note",
+        size: typeof parsed.content === "string" ? parsed.content.length : 0,
+        dryRun: true,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  if (pathname.startsWith("/notes/")) {
+    let parsed: { title?: string; content?: string } = {};
+    try {
+      parsed = bodyText ? (JSON.parse(bodyText) as typeof parsed) : {};
+    } catch {}
+    const path = decodeURIComponent(pathname.replace(/^\/notes\//, ""));
+    return new Response(
+      JSON.stringify({
+        path,
+        title: parsed.title ?? path,
+        size: typeof parsed.content === "string" ? parsed.content.length : 0,
+        dryRun: true,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  if (pathname === "/artifacts/build" || pathname === "/reports/build") {
+    let parsed: { name?: string } = {};
+    try {
+      parsed = bodyText ? (JSON.parse(bodyText) as typeof parsed) : {};
+    } catch {}
+    const name = parsed.name?.trim() || "dry-run";
+    if (pathname === "/artifacts/build") {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          pptxPath: `presentations/${name}/build/${name}.pptx`,
+          size: 0,
+          slides: 0,
+          dryRun: true,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        pdfPath: `reports/${name}/build/${name}.pdf`,
+        size: 0,
+        sections: 0,
+        dryRun: true,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  if (pathname === "/artifacts/url") {
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        url: "https://dry-run.invalid/artifact",
+        dryRun: true,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  return new Response(JSON.stringify({ ok: true, hash: "dry-run", dryRun: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export function vaultFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+  const ctx = getFlowTestContext();
+  const method = (init.method ?? "GET").toUpperCase();
+  if (ctx && method !== "GET" && method !== "HEAD") {
+    const bodyInfo = previewRequestBody(init.body);
+    recordFlowTestVaultMutation({
+      method,
+      url: String(input),
+      status: ctx.mode === "apply" ? "applied" : "captured",
+      bodyPreview: bodyInfo.preview,
+      bodyBytes: bodyInfo.bytes,
+    });
+    if (ctx.mode === "dry_run") {
+      return Promise.resolve(mockVaultMutationResponse(input, init));
+    }
+  }
   return fetch(input, withVaultAuthRequestInit(init));
 }
 

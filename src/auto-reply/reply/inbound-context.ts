@@ -54,6 +54,12 @@ export function finalizeInboundContext<T extends Record<string, unknown>>(
     ).filter((entry) => Boolean(entry));
     normalized.UntrustedContext = normalizedUntrusted;
   }
+  if (Array.isArray(normalized.FlowContext)) {
+    const normalizedFlow = normalized.FlowContext.map((entry) =>
+      normalizeInboundTextNewlines(entry),
+    ).filter((entry) => Boolean(entry));
+    normalized.FlowContext = normalizedFlow;
+  }
 
   const chatType = normalizeChatType(normalized.ChatType);
   if (chatType && (opts.forceChatType || normalized.ChatType !== chatType)) {
