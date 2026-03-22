@@ -487,6 +487,7 @@ export async function runReplyAgent(params: {
       systemPromptReport: runResult.meta?.systemPromptReport,
       cliSessionId,
     });
+    recordFlowTestSystemPromptReport(runResult.meta?.systemPromptReport);
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
@@ -728,3 +729,4 @@ export async function runReplyAgent(params: {
     typing.markRunComplete();
   }
 }
+import { recordFlowTestSystemPromptReport } from "../flow-test-context.js";

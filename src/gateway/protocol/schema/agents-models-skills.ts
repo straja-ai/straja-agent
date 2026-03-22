@@ -164,6 +164,53 @@ export const AgentsFilesSetResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const AgentsFlowTestModeSchema = Type.Union([
+  Type.Literal("match_only"),
+  Type.Literal("dry_run"),
+  Type.Literal("apply"),
+]);
+
+export const AgentsFlowTestParamsSchema = Type.Object(
+  {
+    agentId: NonEmptyString,
+    channel: NonEmptyString,
+    message: Type.String(),
+    mode: Type.Optional(AgentsFlowTestModeSchema),
+    sender: Type.Optional(Type.String()),
+    senderE164: Type.Optional(Type.String()),
+    senderName: Type.Optional(Type.String()),
+    senderUsername: Type.Optional(Type.String()),
+    accountId: Type.Optional(Type.String()),
+    conversationId: Type.Optional(Type.String()),
+    to: Type.Optional(Type.String()),
+    prependContextOverride: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false },
+);
+
+export const AgentsFlowTestResultSchema = Type.Object(
+  {
+    ok: Type.Literal(true),
+    agentId: NonEmptyString,
+    mode: AgentsFlowTestModeSchema,
+    inboundPrependContext: Type.Optional(Type.String()),
+    counts: Type.Optional(Type.Record(NonEmptyString, Type.Integer({ minimum: 0 }))),
+    input: Type.Optional(Type.Any()),
+    promptSnapshot: Type.Optional(Type.Any()),
+    modelSelections: Type.Optional(Type.Array(Type.Any())),
+    systemPromptReport: Type.Optional(Type.Any()),
+    finalPayloads: Type.Array(Type.Any()),
+    blockPayloads: Type.Array(Type.Any()),
+    partialPayloads: Type.Array(Type.Any()),
+    toolStarts: Type.Array(Type.Any()),
+    toolResults: Type.Array(Type.Any()),
+    toolCalls: Type.Optional(Type.Array(Type.Any())),
+    vaultMutations: Type.Array(Type.Any()),
+    messageActions: Type.Array(Type.Any()),
+  },
+  { additionalProperties: false },
+);
+
 export const ModelsListParamsSchema = Type.Object({}, { additionalProperties: false });
 
 export const ModelsListResultSchema = Type.Object(

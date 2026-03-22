@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -18,6 +19,14 @@ import {
   ensureAgentWorkspace,
   isWorkspaceOnboardingCompleted,
 } from "../../agents/workspace.js";
+import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
+import {
+  getFlowTestCaptureSnapshot,
+  recordFlowTestInput,
+  withFlowTestContext,
+} from "../../auto-reply/flow-test-context.js";
+import { buildTestCtx } from "../../auto-reply/reply/test-ctx.js";
+import type { ReplyPayload } from "../../auto-reply/types.js";
 import { movePathToTrash } from "../../browser/trash.js";
 import {
   applyAgentConfig,
@@ -27,6 +36,7 @@ import {
 } from "../../commands/agents.config.js";
 import { loadConfig, writeConfigFile } from "../../config/config.js";
 import { resolveSessionTranscriptsDirForAgent } from "../../config/sessions/paths.js";
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { DEFAULT_AGENT_ID, normalizeAgentId } from "../../routing/session-key.js";
 import { resolveUserPath } from "../../utils.js";
 import {
@@ -38,6 +48,7 @@ import {
   validateAgentsFilesGetParams,
   validateAgentsFilesListParams,
   validateAgentsFilesSetParams,
+  validateAgentsFlowTestParams,
   validateAgentsListParams,
   validateAgentsUpdateParams,
 } from "../protocol/index.js";
@@ -140,6 +151,108 @@ async function writeVaultFile(filename: string, content: string): Promise<void> 
     return;
   }
   throw new Error("Vault workspace patch does not support _memory files");
+}
+
+function buildSyntheticFlowTestContext(params: {
+  channel: string;
+  message: string;
+  sender?: string;
+  senderE164?: string;
+  senderName?: string;
+  senderUsername?: string;
+  accountId?: string;
+  conversationId?: string;
+  to?: string;
+  agentId: string;
+}) {
+  const channel = params.channel.trim().toLowerCase();
+  const sender =
+    params.sender?.trim() ||
+    params.senderE164?.trim() ||
+    (channel === "telegram" ? "telegram:123456789" : "+15550001111");
+  const senderE164 = params.senderE164?.trim() || (sender.startsWith("+") ? sender : undefined);
+  const conversationId = params.conversationId?.trim() || params.to?.trim() || sender;
+  const to = params.to?.trim() || conversationId;
+  const prefixedFrom = sender.includes(":") ? sender : `${channel}:${sender}`;
+  const prefixedTo = to.includes(":") ? to : `${channel}:${to}`;
+  const sessionKey = `agent:${normalizeAgentId(params.agentId)}:flow-test:${randomUUID().slice(0, 8)}`;
+
+  return buildTestCtx({
+    Body: params.message,
+    RawBody: params.message,
+    BodyForCommands: params.message,
+    CommandBody: params.message,
+    CommandSource: "text",
+    Provider: channel,
+    Surface: channel,
+    OriginatingChannel: channel,
+    From: prefixedFrom,
+    To: prefixedTo,
+    OriginatingTo: conversationId,
+    SenderId: sender,
+    SenderE164: senderE164,
+    SenderName: params.senderName?.trim() || undefined,
+    SenderUsername: params.senderUsername?.trim() || undefined,
+    AccountId: params.accountId?.trim() || undefined,
+    SessionKey: sessionKey,
+    CommandAuthorized: true,
+  });
+}
+
+async function resolveInboundFlowTestPrependContext(params: {
+  ctx: ReturnType<typeof buildTestCtx>;
+  agentId: string;
+  prependContextOverride?: string;
+}): Promise<string | undefined> {
+  if (params.prependContextOverride?.trim()) {
+    return params.prependContextOverride.trim();
+  }
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("before_inbound_dispatch")) {
+    return undefined;
+  }
+  const ctx = params.ctx;
+  const messageId =
+    ctx.MessageSidFull ?? ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
+  const content =
+    typeof ctx.BodyForCommands === "string"
+      ? ctx.BodyForCommands
+      : typeof ctx.RawBody === "string"
+        ? ctx.RawBody
+        : typeof ctx.Body === "string"
+          ? ctx.Body
+          : "";
+  const result = await hookRunner.runBeforeInboundDispatch(
+    {
+      from: ctx.From ?? "",
+      content,
+      timestamp:
+        typeof ctx.Timestamp === "number" && Number.isFinite(ctx.Timestamp)
+          ? ctx.Timestamp
+          : undefined,
+      metadata: {
+        to: ctx.To,
+        provider: ctx.Provider,
+        surface: ctx.Surface,
+        threadId: ctx.MessageThreadId,
+        originatingChannel: ctx.OriginatingChannel,
+        originatingTo: ctx.OriginatingTo,
+        messageId,
+        senderId: ctx.SenderId,
+        senderName: ctx.SenderName,
+        senderUsername: ctx.SenderUsername,
+        senderE164: ctx.SenderE164,
+      },
+    },
+    {
+      channelId: String(ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase(),
+      accountId: ctx.AccountId,
+      conversationId: ctx.OriginatingTo ?? ctx.To ?? ctx.From ?? undefined,
+      sessionKey: ctx.SessionKey,
+      agentId: params.agentId,
+    },
+  );
+  return result?.prependContext?.trim() || undefined;
 }
 
 function resolveAgentWorkspaceFileOrRespondError(
@@ -616,5 +729,168 @@ export const agentsHandlers: GatewayRequestHandlers = {
       },
       undefined,
     );
+  },
+  "agents.flow.test": async ({ params, respond }) => {
+    if (!validateAgentsFlowTestParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid agents.flow.test params: ${formatValidationErrors(
+            validateAgentsFlowTestParams.errors,
+          )}`,
+        ),
+      );
+      return;
+    }
+
+    const cfg = loadConfig();
+    const agentId = resolveAgentIdOrError(String(params.agentId ?? ""), cfg);
+    if (!agentId) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown agent id"));
+      return;
+    }
+
+    const mode =
+      typeof params.mode === "string" && params.mode.trim() ? params.mode.trim() : "dry_run";
+    const syntheticCtx = buildSyntheticFlowTestContext({
+      agentId,
+      channel: String(params.channel ?? ""),
+      message: String(params.message ?? ""),
+      sender: typeof params.sender === "string" ? params.sender : undefined,
+      senderE164: typeof params.senderE164 === "string" ? params.senderE164 : undefined,
+      senderName: typeof params.senderName === "string" ? params.senderName : undefined,
+      senderUsername: typeof params.senderUsername === "string" ? params.senderUsername : undefined,
+      accountId: typeof params.accountId === "string" ? params.accountId : undefined,
+      conversationId: typeof params.conversationId === "string" ? params.conversationId : undefined,
+      to: typeof params.to === "string" ? params.to : undefined,
+    });
+    const prependContextOverride =
+      typeof params.prependContextOverride === "string" ? params.prependContextOverride : undefined;
+
+    const inboundPrependContext = await resolveInboundFlowTestPrependContext({
+      ctx: syntheticCtx,
+      agentId,
+      prependContextOverride,
+    });
+
+    if (mode === "match_only") {
+      respond(
+        true,
+        {
+          ok: true,
+          agentId,
+          mode,
+          inboundPrependContext,
+          finalPayloads: [],
+          blockPayloads: [],
+          partialPayloads: [],
+          toolStarts: [],
+          toolResults: [],
+          vaultMutations: [],
+          messageActions: [],
+        },
+        undefined,
+      );
+      return;
+    }
+
+    const finalPayloads: ReplyPayload[] = [];
+    const blockPayloads: ReplyPayload[] = [];
+    const partialPayloads: ReplyPayload[] = [];
+    const toolResults: ReplyPayload[] = [];
+    const toolStarts: Array<{ name?: string; phase?: string }> = [];
+
+    const runTest = async () => {
+      recordFlowTestInput({
+        channel: String(params.channel ?? ""),
+        message: String(params.message ?? ""),
+        sender: typeof params.sender === "string" ? params.sender : undefined,
+        senderE164: typeof params.senderE164 === "string" ? params.senderE164 : undefined,
+        senderName: typeof params.senderName === "string" ? params.senderName : undefined,
+        senderUsername:
+          typeof params.senderUsername === "string" ? params.senderUsername : undefined,
+        accountId: typeof params.accountId === "string" ? params.accountId : undefined,
+        conversationId:
+          typeof params.conversationId === "string" ? params.conversationId : undefined,
+        to: typeof params.to === "string" ? params.to : undefined,
+        sessionKey: syntheticCtx.SessionKey,
+        from: syntheticCtx.From,
+      });
+      const result = await dispatchInboundMessage({
+        ctx: syntheticCtx,
+        cfg,
+        dispatcher: {
+          sendToolResult: () => true,
+          sendBlockReply: (payload) => {
+            blockPayloads.push(payload);
+            return true;
+          },
+          sendFinalReply: (payload) => {
+            finalPayloads.push(payload);
+            return true;
+          },
+          waitForIdle: async () => {},
+          getQueuedCounts: () => ({
+            tool: toolResults.length,
+            block: blockPayloads.length,
+            final: finalPayloads.length,
+          }),
+          markComplete: () => {},
+        },
+        replyOptions: {
+          onPartialReply: (payload) => {
+            partialPayloads.push(payload);
+          },
+          onToolResult: (payload) => {
+            toolResults.push(payload);
+          },
+          onToolStart: (payload) => {
+            toolStarts.push(payload);
+          },
+        },
+        dispatchOptions: {
+          prependContextOverride,
+          skipBeforeInboundDispatchHooks: Boolean(prependContextOverride?.trim()),
+        },
+      });
+
+      const capture = getFlowTestCaptureSnapshot();
+      return {
+        ok: true,
+        agentId,
+        mode,
+        inboundPrependContext: result.inboundPrependContext ?? inboundPrependContext,
+        counts: {
+          ...result.counts,
+          tool: toolResults.length,
+          block: blockPayloads.length,
+          final: finalPayloads.length,
+        },
+        finalPayloads,
+        blockPayloads,
+        partialPayloads,
+        toolStarts,
+        toolResults,
+        input: capture?.input,
+        promptSnapshot: capture?.promptSnapshot,
+        modelSelections: capture?.modelSelections ?? [],
+        systemPromptReport: capture?.systemPromptReport,
+        toolCalls: capture?.toolCalls ?? [],
+        vaultMutations: capture?.vaultMutations ?? [],
+        messageActions: capture?.messageActions ?? [],
+      };
+    };
+
+    try {
+      const payload =
+        mode === "apply"
+          ? await withFlowTestContext({ mode: "apply" }, runTest)
+          : await withFlowTestContext({ mode: "dry_run" }, runTest);
+      respond(true, payload, undefined);
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)));
+    }
   },
 };

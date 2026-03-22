@@ -5,6 +5,10 @@ import {
   readStringArrayParam,
   readStringParam,
 } from "../../agents/tools/common.js";
+import {
+  getFlowTestContext,
+  recordFlowTestMessageAction,
+} from "../../auto-reply/flow-test-context.js";
 import { parseReplyDirectives } from "../../auto-reply/reply/reply-directives.js";
 import { dispatchChannelMessageAction } from "../../channels/plugins/message-actions.js";
 import type {
@@ -691,6 +695,7 @@ async function handlePluginAction(ctx: ResolvedActionContext): Promise<MessageAc
 export async function runMessageAction(
   input: RunMessageActionParams,
 ): Promise<MessageActionRunResult> {
+  const flowTestContext = getFlowTestContext();
   const cfg = input.cfg;
   const params = { ...input.params };
   const resolvedAgentId =
@@ -756,7 +761,11 @@ export async function runMessageAction(
   if (accountId) {
     params.accountId = accountId;
   }
-  const dryRun = Boolean(input.dryRun ?? readBooleanParam(params, "dryRun"));
+  const dryRun = Boolean(
+    flowTestContext
+      ? flowTestContext.mode === "dry_run"
+      : (input.dryRun ?? readBooleanParam(params, "dryRun")),
+  );
 
   await normalizeSandboxMediaParams({
     args: params,
@@ -799,8 +808,9 @@ export async function runMessageAction(
 
   const gateway = resolveGateway(input);
 
+  let result: MessageActionRunResult;
   if (action === "send") {
-    return handleSendAction({
+    result = await handleSendAction({
       cfg,
       params,
       channel,
@@ -812,10 +822,19 @@ export async function runMessageAction(
       resolvedTarget,
       abortSignal: input.abortSignal,
     });
-  }
-
-  if (action === "poll") {
-    return handlePollAction({
+  } else if (action === "poll") {
+    result = await handlePollAction({
+      cfg,
+      params,
+      channel,
+      accountId,
+      dryRun,
+      gateway,
+      input,
+      abortSignal: input.abortSignal,
+    });
+  } else {
+    result = await handlePluginAction({
       cfg,
       params,
       channel,
@@ -827,14 +846,14 @@ export async function runMessageAction(
     });
   }
 
-  return handlePluginAction({
-    cfg,
-    params,
-    channel,
-    accountId,
-    dryRun,
-    gateway,
-    input,
-    abortSignal: input.abortSignal,
-  });
+  if (flowTestContext) {
+    recordFlowTestMessageAction({
+      action: result.action,
+      channel: result.channel,
+      target: "to" in result ? result.to : undefined,
+      dryRun: result.dryRun,
+      payload: result.payload,
+    });
+  }
+  return result;
 }

@@ -38,6 +38,10 @@ export async function dispatchInboundMessage(params: {
   dispatcher: ReplyDispatcher;
   replyOptions?: Omit<GetReplyOptions, "onToolResult" | "onBlockReply">;
   replyResolver?: typeof import("./reply.js").getReplyFromConfig;
+  dispatchOptions?: {
+    prependContextOverride?: string;
+    skipBeforeInboundDispatchHooks?: boolean;
+  };
 }): Promise<DispatchInboundResult> {
   const finalized = finalizeInboundContext(params.ctx);
   return await withReplyDispatcher({
@@ -49,6 +53,8 @@ export async function dispatchInboundMessage(params: {
         dispatcher: params.dispatcher,
         replyOptions: params.replyOptions,
         replyResolver: params.replyResolver,
+        prependContextOverride: params.dispatchOptions?.prependContextOverride,
+        skipBeforeInboundDispatchHooks: params.dispatchOptions?.skipBeforeInboundDispatchHooks,
       }),
   });
 }

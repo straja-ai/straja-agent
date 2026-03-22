@@ -21,6 +21,7 @@ import { clearCommandLane, getQueueSize } from "../../process/command-queue.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import { hasControlCommand } from "../command-detection.js";
+import { recordFlowTestPromptSnapshot } from "../flow-test-context.js";
 import { buildInboundMediaNote } from "../media-note.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import {
@@ -38,6 +39,7 @@ import { runReplyAgent } from "./agent-runner.js";
 import { applySessionHints } from "./body.js";
 import type { buildCommandContext } from "./commands.js";
 import type { InlineDirectives } from "./directive-handling.js";
+import { appendFlowContext } from "./flow-context.js";
 import { buildGroupChatContext, buildGroupIntro } from "./groups.js";
 import { buildInboundMetaSystemPrompt, buildInboundUserContextPrefix } from "./inbound-meta.js";
 import type { createModelSelectionState } from "./model-selection.js";
@@ -257,6 +259,7 @@ export async function runPreparedReply(
     isNewSession,
     prefixedBodyBase,
   });
+  prefixedBodyBase = appendFlowContext(prefixedBodyBase, sessionCtx.FlowContext);
   prefixedBodyBase = appendUntrustedContext(prefixedBodyBase, sessionCtx.UntrustedContext);
   const threadStarterBody = ctx.ThreadStarterBody?.trim();
   const threadHistoryBody = ctx.ThreadHistoryBody?.trim();
@@ -299,6 +302,17 @@ export async function runPreparedReply(
   if (!resolvedThinkLevel) {
     resolvedThinkLevel = await modelState.resolveDefaultThinkingLevel();
   }
+  recordFlowTestPromptSnapshot({
+    inboundUserContext,
+    effectiveBaseBody,
+    prefixedBodyBase,
+    prefixedBody,
+    prefixedCommandBody,
+    flowContext: Array.isArray(sessionCtx.FlowContext) ? sessionCtx.FlowContext : undefined,
+    untrustedContext: Array.isArray(sessionCtx.UntrustedContext)
+      ? sessionCtx.UntrustedContext
+      : undefined,
+  });
   if (resolvedThinkLevel === "xhigh" && !supportsXHighThinking(provider, model)) {
     const explicitThink = directives.hasThinkDirective && directives.thinkLevel !== undefined;
     if (explicitThink) {

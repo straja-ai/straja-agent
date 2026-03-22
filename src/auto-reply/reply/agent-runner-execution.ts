@@ -176,6 +176,11 @@ export async function runAgentTurnWithFallback(params: {
             model,
             thinkLevel: params.followupRun.run.thinkLevel,
           });
+          recordFlowTestModelSelection({
+            provider,
+            model,
+            thinkLevel: params.followupRun.run.thinkLevel,
+          });
 
           if (isCliProvider(provider, params.followupRun.run.config)) {
             const startedAt = Date.now();
@@ -584,3 +589,4 @@ export async function runAgentTurnWithFallback(params: {
     directlySentBlockKeys: directlySentBlockKeys.size > 0 ? directlySentBlockKeys : undefined,
   };
 }
+import { recordFlowTestModelSelection } from "../flow-test-context.js";

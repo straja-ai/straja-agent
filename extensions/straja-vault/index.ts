@@ -6,6 +6,7 @@ import { registerBootstrapPatch } from "./src/bootstrap-patch.js";
 import { registerCredentialsPatch } from "./src/credentials-patch.js";
 import { registerCronStorePatch } from "./src/cron-store-patch.js";
 import { registerDeliveryQueuePatch } from "./src/delivery-queue-patch.js";
+import { buildInboundFlowPromptContext } from "./src/flows.js";
 import { registerFsToolsPatch } from "./src/fs-tools-patch.js";
 import { registerGatewayWorkspacePatch } from "./src/gateway-workspace-patch.js";
 import {
@@ -90,6 +91,7 @@ let logsPatched = false;
 let auditPatched = false;
 let hookRegistered = false;
 let promptHookRegistered = false;
+let inboundFlowHookRegistered = false;
 const memoryInjectedSessions = new Set<string>();
 
 // ---------------------------------------------------------------------------
@@ -555,6 +557,31 @@ const plugin = {
       api.logger.info(
         `Memory context injection hook registered (default mode: ${initialMemoryPromptInjectionMode})`,
       );
+    }
+
+    if (!inboundFlowHookRegistered) {
+      api.on(
+        "before_inbound_dispatch",
+        async (event, ctx) => {
+          try {
+            const flowContext = await buildInboundFlowPromptContext({
+              baseUrl,
+              event,
+              ctx,
+            });
+            if (!flowContext) {
+              return;
+            }
+            return { prependContext: flowContext };
+          } catch (err) {
+            api.logger.warn(`inbound flow context failed: ${String(err)}`);
+            return;
+          }
+        },
+        { priority: 20 },
+      );
+      inboundFlowHookRegistered = true;
+      api.logger.info("Inbound flow context hook registered (_flows → current inbound turn)");
     }
 
     // -----------------------------------------------------------------------

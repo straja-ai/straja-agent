@@ -1,5 +1,10 @@
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
+import {
+  getFlowTestContext,
+  recordFlowTestToolCall,
+  recordFlowTestVaultMutation,
+} from "../../../src/auto-reply/flow-test-context.js";
 import { vaultFetch } from "./http.js";
 
 // ---------------------------------------------------------------------------
@@ -39,6 +44,120 @@ export const VaultGetSchema = Type.Object({
 });
 
 export const VaultStatusSchema = Type.Object({});
+
+const SpreadsheetCellValueSchema = Type.Union([
+  Type.String(),
+  Type.Number(),
+  Type.Boolean(),
+  Type.Null(),
+]);
+
+export const VaultSpreadsheetGetSchema = Type.Object({
+  collection: Type.String({
+    description: "Collection name containing the spreadsheet-backed document (e.g. 'elevi').",
+  }),
+  path: Type.String({
+    description:
+      "Canonical collection document path or title for the spreadsheet-backed file " +
+      "(e.g. 'Prezenta_elevi' or 'Prezenta_elevi.json').",
+  }),
+  limit: Type.Optional(
+    Type.Number({
+      description: "Maximum rows to return (default: 100, max: 500).",
+      minimum: 1,
+      maximum: 500,
+      default: 100,
+    }),
+  ),
+});
+
+export const VaultSpreadsheetMatchSchema = Type.Object({
+  collection: Type.String({
+    description: "Collection name containing the spreadsheet-backed document.",
+  }),
+  path: Type.String({
+    description: "Canonical collection document path or title for the spreadsheet-backed file.",
+  }),
+  value: SpreadsheetCellValueSchema,
+  columns: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Optional list of columns to search. Omit to search all columns.",
+    }),
+  ),
+  mode: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal("exact"),
+        Type.Literal("trimmed"),
+        Type.Literal("casefold"),
+        Type.Literal("digits"),
+      ],
+      {
+        description:
+          "Normalization mode. Use 'digits' for phone numbers, 'casefold' for case-insensitive text, " +
+          "'trimmed' to ignore outer whitespace.",
+        default: "exact",
+      },
+    ),
+  ),
+  limit: Type.Optional(
+    Type.Number({
+      description: "Maximum matches to return (default: 20).",
+      minimum: 1,
+      maximum: 100,
+      default: 20,
+    }),
+  ),
+});
+
+export const VaultSpreadsheetUpdateSchema = Type.Object({
+  collection: Type.String({
+    description: "Collection name containing the spreadsheet-backed document.",
+  }),
+  path: Type.String({
+    description: "Canonical collection document path or title for the spreadsheet-backed file.",
+  }),
+  rowIndex: Type.Optional(
+    Type.Number({
+      description: "Zero-based row index to update directly.",
+      minimum: 0,
+    }),
+  ),
+  matchValue: Type.Optional(SpreadsheetCellValueSchema),
+  matchColumns: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Columns to use for matchValue lookup.",
+    }),
+  ),
+  matchMode: Type.Optional(
+    Type.Union(
+      [
+        Type.Literal("exact"),
+        Type.Literal("trimmed"),
+        Type.Literal("casefold"),
+        Type.Literal("digits"),
+      ],
+      {
+        description: "Normalization mode for matchValue lookup.",
+        default: "exact",
+      },
+    ),
+  ),
+  updates: Type.Record(Type.String(), SpreadsheetCellValueSchema, {
+    description: "Column/value updates to apply to the matched row.",
+  }),
+  createIfMissing: Type.Optional(
+    Type.Boolean({
+      description: "If true, create a new row when no match is found.",
+      default: false,
+    }),
+  ),
+  seedRow: Type.Optional(
+    Type.Record(Type.String(), SpreadsheetCellValueSchema, {
+      description: "Optional initial row values when createIfMissing is true.",
+    }),
+  ),
+});
 
 // ---------------------------------------------------------------------------
 // Memory Schemas
@@ -880,6 +999,58 @@ export type VaultToolsOptions = {
 };
 
 export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): AnyAgentTool[] {
+  function summarizeToolValue(value: unknown, depth = 0): unknown {
+    if (
+      value == null ||
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      return value;
+    }
+    if (depth > 2) {
+      return "[truncated]";
+    }
+    if (Array.isArray(value)) {
+      return value.slice(0, 5).map((item) => summarizeToolValue(item, depth + 1));
+    }
+    if (typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      const entries = Object.entries(value as Record<string, unknown>).slice(0, 12);
+      for (const [key, item] of entries) {
+        out[key] = summarizeToolValue(item, depth + 1);
+      }
+      return out;
+    }
+    return String(value);
+  }
+
+  function withFlowTestRecording(tool: AnyAgentTool): AnyAgentTool {
+    return {
+      ...tool,
+      async execute(toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+        try {
+          const result = await tool.execute(toolCallId, params, signal);
+          recordFlowTestToolCall({
+            name: tool.name,
+            params: summarizeToolValue(params),
+            outcome: "success",
+            result: summarizeToolValue(result),
+          });
+          return result;
+        } catch (err) {
+          recordFlowTestToolCall({
+            name: tool.name,
+            params: summarizeToolValue(params),
+            outcome: "error",
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
+      },
+    };
+  }
+
   // -- vault_search -----------------------------------------------------------
   const vaultSearch: AnyAgentTool = {
     name: "vault_search",
@@ -888,7 +1059,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "Search the Straja Vault document collections using hybrid retrieval " +
       "(keyword + semantic + hypothetical document). Returns ranked results " +
       "with titles, relevance scores, and text snippets. " +
-      "Use vault_get to read the full content of a specific result.",
+      "Use vault_get to read the full content of a specific result. " +
+      "If the user already names a collection and likely document title/path, use this to resolve it; do not ask the user to upload the file or provide a local filesystem path first.",
     parameters: VaultSearchSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
       const query = String(params.query || "");
@@ -938,7 +1110,9 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         // Format results for the LLM
         const lines = results.map((r, i) => {
           const hasSourceAsset = r.snippet.includes("_source_asset");
-          const tag = hasSourceAsset ? " [has original file — use vault_exec for exact data]" : "";
+          const tag = hasSourceAsset
+            ? " [spreadsheet-backed document — prefer vault_spreadsheet_get/match/update]"
+            : "";
           return `[${i + 1}] ${r.title} (${r.file}) — score: ${r.score}${tag}\n${r.snippet}`;
         });
         const text = `Found ${results.length} result(s):\n\n${lines.join("\n\n")}`;
@@ -962,11 +1136,12 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     description:
       "Retrieve the full text content of a document from Straja Vault. " +
       "Use the collection name and file path from vault_search results. " +
+      "If the user names a collection and document directly, you can use this access path immediately without asking for an upload or local path. " +
       "Some documents (e.g. Google Drive spreadsheets) are JSON indexes " +
       "with a _source_asset field pointing to the original binary file. " +
-      "When you see _source_asset, always use vault_exec to process the " +
-      "original file (e.g. with require('xlsx')) for accurate results " +
-      "instead of relying on the JSON index data.",
+      "When you see _source_asset on a spreadsheet-backed document, prefer " +
+      "vault_spreadsheet_get, vault_spreadsheet_match, and vault_spreadsheet_update " +
+      "instead of vault_exec. Use vault_exec only for true raw binary workflows.",
     parameters: VaultGetSchema,
     async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
       const collection = String(params.collection || "");
@@ -1010,10 +1185,10 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
           const parsed = JSON.parse(data.content);
           if (parsed && typeof parsed._source_asset === "string") {
             sourceAssetHint =
-              `\n\n⚠️ IMPORTANT: This JSON is a search index only — the data may be truncated or have ` +
-              `formatting artifacts. The original source file is available at: ${parsed._source_asset}\n` +
-              `For accurate data extraction, use vault_exec to process the original file directly, e.g.:\n` +
-              `  node -e "const XLSX = require('xlsx'); const wb = XLSX.readFile('${parsed._source_asset}'); ..."`;
+              `\n\n⚠️ IMPORTANT: This document is spreadsheet-backed. ` +
+              `Prefer vault_spreadsheet_get to inspect rows, vault_spreadsheet_match to locate rows, ` +
+              `and vault_spreadsheet_update to modify data and regenerate the linked original asset. ` +
+              `The linked original asset path is: ${parsed._source_asset}`;
           }
         } catch {
           // Not JSON — no hint needed
@@ -1023,6 +1198,214 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
 
         return {
           content: [{ type: "text" as const, text }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_spreadsheet_get --------------------------------------------------
+  const vaultSpreadsheetGet: AnyAgentTool = {
+    name: "vault_spreadsheet_get",
+    label: "Vault Spreadsheet Get",
+    description:
+      "Read structured rows from a spreadsheet-backed collection document. " +
+      "Use this for imported Google Sheets, xlsx, xls, or csv files that appear in a collection as parsed documents. " +
+      "This is the preferred inspection path instead of vault_exec. " +
+      "If the user names the collection and spreadsheet-backed document, use this directly; do not claim you lack access or ask for the file to be uploaded first.",
+    parameters: VaultSpreadsheetGetSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      try {
+        const resp = await vaultFetch(`${baseUrl}/spreadsheets/get`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+          signal,
+        });
+        if (!resp.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Spreadsheet get error (${resp.status}): ${await resp.text()}`,
+              },
+            ],
+          };
+        }
+        const data = (await resp.json()) as {
+          collection: string;
+          path: string;
+          title: string;
+          rowCount: number;
+          columns: string[];
+          rows: Array<Record<string, unknown>>;
+          sourceAsset?: string | null;
+          truncated?: boolean;
+        };
+        const header = `Spreadsheet ${data.collection}/${data.path} — ${data.rowCount} row(s), ${data.columns.length} column(s).`;
+        const detail = JSON.stringify(
+          {
+            columns: data.columns,
+            rows: data.rows,
+            sourceAsset: data.sourceAsset ?? null,
+            truncated: Boolean(data.truncated),
+          },
+          null,
+          2,
+        );
+        return {
+          content: [{ type: "text" as const, text: `${header}\n${detail}` }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_spreadsheet_match ------------------------------------------------
+  const vaultSpreadsheetMatch: AnyAgentTool = {
+    name: "vault_spreadsheet_match",
+    label: "Vault Spreadsheet Match",
+    description:
+      "Find matching rows in a spreadsheet-backed collection document. " +
+      "Use mode='digits' for phone numbers and similar normalized identifiers. " +
+      "This is the preferred way to map a sender to a student/contact row. " +
+      "If the user already named the collection and spreadsheet doc, use this directly rather than asking for manual file access.",
+    parameters: VaultSpreadsheetMatchSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      try {
+        const resp = await vaultFetch(`${baseUrl}/spreadsheets/match`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(params),
+          signal,
+        });
+        if (!resp.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Spreadsheet match error (${resp.status}): ${await resp.text()}`,
+              },
+            ],
+          };
+        }
+        const data = (await resp.json()) as {
+          collection: string;
+          path: string;
+          rowCount: number;
+          columns: string[];
+          matchValue: string;
+          mode: string;
+          matches: Array<{
+            rowIndex: number;
+            matchedColumns: string[];
+            row: Record<string, unknown>;
+          }>;
+          truncated?: boolean;
+          sourceAsset?: string | null;
+        };
+        const text = [
+          `Spreadsheet matches in ${data.collection}/${data.path}: ${data.matches.length}`,
+          `mode=${data.mode} value=${JSON.stringify(data.matchValue)}`,
+          JSON.stringify(
+            {
+              columns: data.columns,
+              matches: data.matches,
+              truncated: Boolean(data.truncated),
+              sourceAsset: data.sourceAsset ?? null,
+            },
+            null,
+            2,
+          ),
+        ].join("\n");
+        return {
+          content: [{ type: "text" as const, text }],
+          details: data,
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_spreadsheet_update -----------------------------------------------
+  const vaultSpreadsheetUpdate: AnyAgentTool = {
+    name: "vault_spreadsheet_update",
+    label: "Vault Spreadsheet Update",
+    description:
+      "Update a row in a spreadsheet-backed collection document and regenerate the linked original spreadsheet asset when one exists. " +
+      "Use rowIndex directly or matchValue + matchColumns. Set createIfMissing=true to append a new row when needed. " +
+      "Prefer this instead of vault_exec for spreadsheet edits. " +
+      "If the user names the collection and spreadsheet-backed document, use this workflow instead of asking for an upload or local repo path.",
+    parameters: VaultSpreadsheetUpdateSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      try {
+        const requestBody = JSON.stringify(params);
+        const resp = await vaultFetch(`${baseUrl}/spreadsheets/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: requestBody,
+          signal,
+        });
+        if (!resp.ok) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Spreadsheet update error (${resp.status}): ${await resp.text()}`,
+              },
+            ],
+          };
+        }
+        const data = (await resp.json()) as {
+          updated: boolean;
+          collection: string;
+          path: string;
+          rowIndex: number;
+          row: Record<string, unknown>;
+          assetUpdated?: boolean;
+          assetPath?: string | null;
+        };
+        const flowTestCtx = getFlowTestContext();
+        if (flowTestCtx) {
+          const alreadyCaptured = flowTestCtx.capture.vaultMutations.some(
+            (entry) =>
+              entry.method === "POST" && String(entry.url ?? "").includes("/spreadsheets/update"),
+          );
+          if (!alreadyCaptured) {
+            recordFlowTestVaultMutation({
+              method: "POST",
+              url: `${baseUrl}/spreadsheets/update`,
+              status: flowTestCtx.mode === "apply" ? "applied" : "captured",
+              bodyPreview: requestBody.slice(0, 1000),
+              bodyBytes: Buffer.byteLength(requestBody),
+            });
+          }
+        }
+        const parts = [
+          `Updated spreadsheet row ${data.rowIndex} in ${data.collection}/${data.path}.`,
+          JSON.stringify(
+            {
+              row: data.row,
+              assetUpdated: Boolean(data.assetUpdated),
+              assetPath: data.assetPath ?? null,
+            },
+            null,
+            2,
+          ),
+        ];
+        return {
+          content: [{ type: "text" as const, text: parts.join("\n") }],
           details: data,
         };
       } catch (err) {
@@ -3944,6 +4327,9 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
   return [
     vaultSearch,
     vaultGet,
+    vaultSpreadsheetGet,
+    vaultSpreadsheetMatch,
+    vaultSpreadsheetUpdate,
     vaultStatus,
     vaultExec,
     vaultProcess,
@@ -3997,5 +4383,5 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultBrowserStop,
     vaultBrowserConsole,
     vaultBrowserWait,
-  ];
+  ].map(withFlowTestRecording);
 }
