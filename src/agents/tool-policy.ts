@@ -1,4 +1,12 @@
+import {
+  TOOL_GROUPS,
+  USER_FACING_TOOL_GROUPS,
+  ALL_KNOWN_TOOLS,
+  CHIEF_OF_STAFF_DENYLIST,
+} from "../shared/tool-catalog.js";
 import { type AnyAgentTool, wrapOwnerOnlyToolExecution } from "./tools/common.js";
+
+export { TOOL_GROUPS, USER_FACING_TOOL_GROUPS, ALL_KNOWN_TOOLS, CHIEF_OF_STAFF_DENYLIST };
 
 export type ToolProfileId =
   | "minimal"
@@ -26,120 +34,6 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   vault_session_status: "session_status",
 };
 
-export const TOOL_GROUPS: Record<string, string[]> = {
-  // NOTE: Keep canonical (lowercase) tool names here.
-  "group:memory": ["memory_search", "memory_get", "vault_memory_search", "vault_memory_get"],
-  "group:web": ["web_search", "web_fetch", "vault_web_search_duckduckgo", "vault_web_fetch"],
-  // Basic workspace/file tools
-  "group:fs": ["read", "write", "edit", "apply_patch"],
-  // Host/runtime execution tools (includes vault equivalents)
-  "group:runtime": ["exec", "process", "vault_exec", "vault_process"],
-  // Session management tools
-  "group:sessions": [
-    "sessions_list",
-    "sessions_history",
-    "sessions_send",
-    "sessions_spawn",
-    "subagents",
-    "session_status",
-  ],
-  // UI helpers
-  "group:ui": ["browser", "canvas"],
-  // Artifact creation tools
-  "group:artifacts": [
-    "vault_artifact_write",
-    "vault_artifact_list",
-    "vault_presentation_build",
-    "vault_report_build",
-    "vault_artifact_url",
-    "vault_agent_collection_create",
-    "vault_agent_collection_write",
-    "vault_agent_collection_list",
-  ],
-  // GitHub API integration tools (REST API via vault OAuth)
-  "group:github_api": [
-    "vault_github_create_issue",
-    "vault_github_list_issues",
-    "vault_github_create_branch",
-    "vault_github_create_pr",
-    "vault_github_list_prs",
-    "vault_github_push",
-  ],
-  // Developer tools — on-disk repo execution + repo discovery
-  "group:developer": ["vault_repo_exec", "vault_repos_list"],
-  // Vault browser automation tools
-  "group:vault_browser": [
-    "vault_browser_navigate",
-    "vault_browser_snapshot",
-    "vault_browser_click",
-    "vault_browser_type",
-    "vault_browser_fill",
-    "vault_browser_select",
-    "vault_browser_hover",
-    "vault_browser_press_key",
-    "vault_browser_screenshot",
-    "vault_browser_tab_list",
-    "vault_browser_tab_new",
-    "vault_browser_tab_close",
-    "vault_browser_tabs",
-    "vault_browser_pdf",
-    "vault_browser_dialog",
-    "vault_browser_upload",
-    "vault_browser_status",
-    "vault_browser_start",
-    "vault_browser_stop",
-    "vault_browser_console",
-    "vault_browser_wait",
-    "vault_approve_domain",
-  ],
-  // Vault read-only document access
-  "group:vault_read": ["vault_search", "vault_get", "vault_status"],
-  // Vault write tools (notes, collections, artifacts)
-  "group:vault_write": [
-    "vault_note_create",
-    "vault_note_update",
-    "vault_memory_write",
-    "vault_agent_collection_create",
-    "vault_agent_collection_write",
-    "vault_agent_collection_list",
-    "vault_artifact_write",
-    "vault_artifact_list",
-    "vault_artifact_url",
-    "vault_presentation_build",
-    "vault_report_build",
-  ],
-  // Gmail integration tools
-  "group:gmail": ["vault_gmail_create_draft", "vault_gmail_update_draft"],
-  // Automation + infra
-  "group:automation": ["vault_cron", "gateway"],
-  // Messaging surface
-  "group:messaging": ["message"],
-  // Nodes + device tools
-  "group:nodes": ["nodes"],
-  // All OpenClaw native tools (excludes provider plugins).
-  "group:openclaw": [
-    "browser",
-    "canvas",
-    "nodes",
-    "vault_cron",
-    "message",
-    "gateway",
-    "agents_list",
-    "sessions_list",
-    "sessions_history",
-    "sessions_send",
-    "sessions_spawn",
-    "subagents",
-    "session_status",
-    "memory_search",
-    "memory_get",
-    "web_search",
-    "web_fetch",
-    "vault_web_fetch",
-    "image",
-  ],
-};
-
 const OWNER_ONLY_TOOL_NAME_FALLBACKS = new Set<string>(["whatsapp_login", "vault_cron", "gateway"]);
 
 const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
@@ -160,22 +54,7 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfilePolicy> = {
   },
   full: {},
   "chief-of-staff": {
-    allow: [
-      "group:vault_read",
-      "group:vault_write",
-      "group:memory",
-      "group:web",
-      "group:vault_browser",
-      "group:github_api",
-      "group:gmail",
-      "group:runtime",
-      "group:sessions",
-      "group:artifacts",
-      "group:messaging",
-      "group:automation",
-      "group:openclaw",
-      "image",
-    ],
+    deny: [...CHIEF_OF_STAFF_DENYLIST],
   },
   "software-engineer": {
     allow: ["group:developer", "group:github_api", "group:sessions", "image"],

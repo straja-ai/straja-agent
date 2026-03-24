@@ -46,6 +46,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     "vault_artifact_url",
     "vault_agent_collection_create",
     "vault_agent_collection_write",
+    "vault_collection_write",
     "vault_agent_collection_list",
     "vault_note_create",
     "vault_note_update",

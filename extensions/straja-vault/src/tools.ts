@@ -91,10 +91,12 @@ export const VaultSpreadsheetMatchSchema = Type.Object({
         Type.Literal("trimmed"),
         Type.Literal("casefold"),
         Type.Literal("digits"),
+        Type.Literal("phone"),
       ],
       {
         description:
-          "Normalization mode. Use 'digits' for phone numbers, 'casefold' for case-insensitive text, " +
+          "Normalization mode. Use 'phone' for phone numbers (tolerates punctuation and missing country/trunk prefix variants), " +
+          "'digits' for strict digits-only matching, 'casefold' for case-insensitive text, " +
           "'trimmed' to ignore outer whitespace.",
         default: "exact",
       },
@@ -331,6 +333,31 @@ export const VaultAgentCollectionWriteSchema = Type.Object({
   }),
   path: Type.String({
     description: "File path within the collection (e.g. 'notes/2026-03-10.md').",
+  }),
+  content: Type.String({
+    description: "Content to write.",
+  }),
+  title: Type.Optional(
+    Type.String({
+      description: "Human-readable title for the document. Defaults to the path.",
+    }),
+  ),
+  append: Type.Optional(
+    Type.Boolean({
+      description: "If true, append content instead of overwriting. Default: false.",
+      default: false,
+    }),
+  ),
+});
+
+export const VaultCollectionWriteSchema = Type.Object({
+  collection: Type.String({
+    description:
+      "Collection name to write to (for example 'elevi', 'crm', or another writable vault collection).",
+  }),
+  path: Type.String({
+    description:
+      "File path within the collection (for example 'Iuliana Manole/2026-03-23-mesaj-parinte.md').",
   }),
   content: Type.String({
     description: "Content to write.",
@@ -1275,7 +1302,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     label: "Vault Spreadsheet Match",
     description:
       "Find matching rows in a spreadsheet-backed collection document. " +
-      "Use mode='digits' for phone numbers and similar normalized identifiers. " +
+      "Use mode='phone' for phone numbers and similar sender/contact identifiers. " +
       "This is the preferred way to map a sender to a student/contact row. " +
       "If the user already named the collection and spreadsheet doc, use this directly rather than asking for manual file access.",
     parameters: VaultSpreadsheetMatchSchema,
@@ -1464,6 +1491,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "Pre-installed Node.js libraries are available via require(): xlsx (spreadsheet parsing), " +
       "and other vault-bundled packages. Prefer `node -e \"...\"` with require('xlsx') " +
       "for spreadsheet processing instead of writing manual parsers. " +
+      "Do NOT use this to search for user information stored in Vault collections, notes, spreadsheets, or memory. " +
+      "For retrieval, use vault_search, vault_get, vault_spreadsheet_get, or vault_spreadsheet_match first. " +
       "Commands that complete within 5 seconds return results immediately. " +
       "Longer-running commands are automatically backgrounded — " +
       "use vault_process to poll output, write stdin, or kill the process. " +
@@ -2379,6 +2408,77 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
         }
 
         // Trigger embedding
+        vaultFetch(`${baseUrl}/embed`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }).catch(() => {});
+
+        const action = append ? "appended to" : "wrote";
+        return {
+          content: [
+            { type: "text" as const, text: `Successfully ${action} ${collName}/${docPath}` },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Vault connection error: ${String(err)}` }],
+        };
+      }
+    },
+  };
+
+  // -- vault_collection_write ------------------------------------------------
+  const vaultCollectionWrite: AnyAgentTool = {
+    name: "vault_collection_write",
+    label: "Write to Vault Collection",
+    description:
+      "Write or append content to any writable Vault collection path. " +
+      "Use this for normal user collections like elevi, crm, or project registries. " +
+      "For spreadsheet-backed files, prefer vault_spreadsheet_update instead.",
+    parameters: VaultCollectionWriteSchema,
+    async execute(_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      const collName = String(params.collection || "").trim();
+      const docPath = String(params.path || "").trim();
+      const content = String(params.content ?? "");
+      const append = Boolean(params.append);
+
+      if (!collName) {
+        return { content: [{ type: "text" as const, text: "Error: collection is required." }] };
+      }
+      if (!docPath) {
+        return { content: [{ type: "text" as const, text: "Error: path is required." }] };
+      }
+      if (!content) {
+        return { content: [{ type: "text" as const, text: "Error: content is required." }] };
+      }
+
+      try {
+        const encodedColl = encodeURIComponent(collName);
+        const encodedPath = encodeURIComponent(docPath);
+        let resp: Response;
+
+        if (append) {
+          resp = await vaultFetch(`${baseUrl}/raw/${encodedColl}/${encodedPath}/append`, {
+            method: "POST",
+            body: content,
+            signal,
+          });
+        } else {
+          resp = await vaultFetch(`${baseUrl}/raw/${encodedColl}/${encodedPath}`, {
+            method: "PUT",
+            body: content,
+            signal,
+          });
+        }
+
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return {
+            content: [{ type: "text" as const, text: `Write error (${resp.status}): ${errText}` }],
+          };
+        }
+
         vaultFetch(`${baseUrl}/embed`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3457,6 +3557,8 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
       "Has real filesystem access with git, build tools, package managers, etc. " +
       "Network access is domain-filtered (GitHub, npm registry, and configured allowlist). " +
       "Use vault_repos_list to discover available repos first. " +
+      "This is for software/code repos only. Do NOT use it to search the user's Vault documents, collections, notes, spreadsheets, or student records. " +
+      "For user knowledge retrieval, use vault_search and vault_get instead. " +
       "The cwd parameter is required and must be a repo name or path within a repo. " +
       "Commands that complete within 5 seconds return results immediately. " +
       "Longer-running commands are automatically backgrounded — " +
@@ -4340,6 +4442,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultNoteUpdate,
     vaultAgentCollectionCreate,
     vaultAgentCollectionWrite,
+    vaultCollectionWrite,
     vaultAgentCollectionList,
     vaultArtifactWrite,
     vaultArtifactList,

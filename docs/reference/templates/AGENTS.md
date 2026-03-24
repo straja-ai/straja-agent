@@ -54,6 +54,7 @@ You may be one of several agents in this workspace. Use `agents_list` to discove
 **When NOT to delegate:**
 
 - Quick factual questions about code that you can answer from vault search
+- Vault/collection/document/note/spreadsheet lookups for user data: do these yourself with `vault_search`, `vault_get`, `vault_spreadsheet_get`, or `vault_spreadsheet_match`
 - The user explicitly asks you to do something yourself
 - No SE agent is available (`agents_list` returns none)
 
