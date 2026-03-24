@@ -173,6 +173,7 @@ describe("pairing cli", () => {
       expect(approveChannelPairingCode).toHaveBeenCalledWith({
         channel: "telegram",
         code: "ABCDEFGH",
+        owner: false,
       });
       expect(log).toHaveBeenCalledWith(expect.stringContaining("Approved"));
     } finally {
@@ -197,6 +198,19 @@ describe("pairing cli", () => {
       channel: "telegram",
       code: "ABCDEFGH",
       accountId: "yy",
+      owner: false,
+    });
+  });
+
+  it("forwards --owner for approve", async () => {
+    mockApprovedPairing();
+
+    await runPairing(["pairing", "approve", "--channel", "telegram", "--owner", "ABCDEFGH"]);
+
+    expect(approveChannelPairingCode).toHaveBeenCalledWith({
+      channel: "telegram",
+      code: "ABCDEFGH",
+      owner: true,
     });
   });
 });

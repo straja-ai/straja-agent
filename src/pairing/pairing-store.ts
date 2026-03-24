@@ -690,6 +690,7 @@ export async function approveChannelPairingCode(params: {
   channel: PairingChannel;
   code: string;
   accountId?: string;
+  owner?: boolean;
   env?: NodeJS.ProcessEnv;
 }): Promise<{ id: string; entry?: PairingRequest } | null> {
   const env = params.env ?? process.env;
@@ -724,7 +725,8 @@ export async function approveChannelPairingCode(params: {
       if (!entry) {
         return null;
       }
-      const ownerAllowFromEntry = normalizeAllowFromInput(params.channel, entry.id);
+      const ownerAllowFromEntry =
+        params.owner === true ? normalizeAllowFromInput(params.channel, entry.id) : "";
       if (ownerAllowFromEntry) {
         await ensureOwnerAllowFromConfigEntry(ownerAllowFromEntry);
       }

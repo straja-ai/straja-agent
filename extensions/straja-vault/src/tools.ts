@@ -889,10 +889,62 @@ export const BrowserDialogSchema = Type.Object({
 });
 
 export const BrowserUploadSchema = Type.Object({
-  collection: Type.String({
-    description: "Vault collection containing the file to upload (typically 'uploads').",
-  }),
-  path: Type.String({ description: "Path to the file inside the collection." }),
+  collection: Type.Optional(
+    Type.String({
+      description: "Vault collection containing the file to upload (typically '_uploads').",
+    }),
+  ),
+  path: Type.Optional(Type.String({ description: "Path to the file inside the collection." })),
+  mediaUrl: Type.Optional(
+    Type.String({
+      description:
+        "Optional vault media URL (for example from inbound Telegram media). If provided, the file is staged into '_uploads' before upload.",
+    }),
+  ),
+  mediaPath: Type.Optional(
+    Type.String({
+      description:
+        "Optional vault media reference (for example '_media/<id>' or '/media/<id>'). If provided, the file is staged into '_uploads' before upload.",
+    }),
+  ),
+  stagePath: Type.Optional(
+    Type.String({
+      description:
+        "Optional target path inside '_uploads' when staging from media. If omitted, a safe inbound path is generated automatically.",
+    }),
+  ),
+  overwrite: Type.Optional(
+    Type.Boolean({
+      description:
+        "When staging from media, overwrite an existing file at stagePath if true. Ignored for direct collection/path uploads.",
+    }),
+  ),
+});
+
+export const BrowserStageMediaUploadSchema = Type.Object({
+  mediaUrl: Type.Optional(
+    Type.String({
+      description:
+        "Vault media URL to stage into '_uploads' (for example from inbound Telegram media).",
+    }),
+  ),
+  mediaPath: Type.Optional(
+    Type.String({
+      description:
+        "Vault media reference to stage into '_uploads' (for example '_media/<id>' or '/media/<id>').",
+    }),
+  ),
+  path: Type.Optional(
+    Type.String({
+      description:
+        "Optional target path inside '_uploads'. If omitted, a safe inbound path is generated automatically.",
+    }),
+  ),
+  overwrite: Type.Optional(
+    Type.Boolean({
+      description: "Overwrite an existing staged upload file if true.",
+    }),
+  ),
 });
 
 export const BrowserStatusSchema = Type.Object({});
@@ -4369,10 +4421,26 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     label: "Browser Upload",
     description:
       "Upload a file from the vault to an active browser file chooser. " +
-      "Uses vault collections only (no host filesystem paths).",
+      "Uses vault collections only (no host filesystem paths). Can also auto-stage vault /media URLs into '_uploads'.",
     parameters: BrowserUploadSchema,
     async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
       return callBrowserConnection("/connections/browser/upload", "POST", params, signal);
+    },
+  };
+
+  const vaultStageMediaUpload: AnyAgentTool = {
+    name: "vault_stage_media_upload",
+    label: "Stage Media Upload",
+    description:
+      "Stage inbound vault media (such as a Telegram photo stored under /media) into '_uploads' so it can be used with vault_browser_upload.",
+    parameters: BrowserStageMediaUploadSchema,
+    async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+      return callBrowserConnection(
+        "/connections/browser/uploads/stage-from-media",
+        "POST",
+        params,
+        signal,
+      );
     },
   };
 
@@ -4480,6 +4548,7 @@ export function createVaultTools(baseUrl: string, options?: VaultToolsOptions): 
     vaultBrowserTabs,
     vaultBrowserPdf,
     vaultBrowserDialog,
+    vaultStageMediaUpload,
     vaultBrowserUpload,
     vaultBrowserStatus,
     vaultBrowserStart,

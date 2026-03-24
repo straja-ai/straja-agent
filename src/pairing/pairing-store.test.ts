@@ -203,6 +203,7 @@ describe("pairing store", () => {
       const approved = await approveChannelPairingCode({
         channel: "telegram",
         code: created.code,
+        owner: true,
       });
       expect(approved?.id).toBe("8425169799");
 
@@ -223,6 +224,7 @@ describe("pairing store", () => {
       await approveChannelPairingCode({
         channel: "telegram",
         code: createdAgain.code,
+        owner: true,
       });
       const rawConfigAfter = await fs.readFile(configPath, "utf8");
       const parsedAfter = JSON.parse(rawConfigAfter) as {
@@ -234,6 +236,31 @@ describe("pairing store", () => {
         (entry) => entry === "8425169799",
       );
       expect(entries).toHaveLength(1);
+    });
+  });
+
+  it("does not persist approved ids in commands.ownerAllowFrom unless owner is requested", async () => {
+    await withTempStateDir(async (stateDir) => {
+      const created = await upsertChannelPairingRequest({
+        channel: "telegram",
+        id: "8425169799",
+      });
+      expect(created.created).toBe(true);
+
+      const approved = await approveChannelPairingCode({
+        channel: "telegram",
+        code: created.code,
+      });
+      expect(approved?.id).toBe("8425169799");
+
+      const configPath = path.join(stateDir, "openclaw.json");
+      const rawConfig = await fs.readFile(configPath, "utf8");
+      const parsedConfig = JSON.parse(rawConfig) as {
+        commands?: {
+          ownerAllowFrom?: unknown[];
+        };
+      };
+      expect(parsedConfig.commands?.ownerAllowFrom ?? []).not.toContain("8425169799");
     });
   });
 

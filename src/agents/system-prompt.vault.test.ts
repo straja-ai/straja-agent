@@ -34,6 +34,7 @@ describe("buildAgentSystemPrompt vault tool injection", () => {
         "vault_web_search_duckduckgo",
         "vault_web_fetch",
         "vault_approve_domain",
+        "vault_stage_media_upload",
         "vault_browser_navigate",
         "vault_browser_snapshot",
         "sessions_list",
@@ -60,6 +61,10 @@ describe("buildAgentSystemPrompt vault tool injection", () => {
     expect(prompt).toContain("## Vault Spreadsheets");
     expect(prompt).toContain("## Vault Automation");
     expect(prompt).toContain("## Vault Browser & Domain Approval");
+    expect(prompt).toContain("Upload staging tools: vault_stage_media_upload.");
+    expect(prompt).toContain(
+      "If an image or file comes from inbound vault media (for example a Telegram photo exposed as a vault /media URL), stage it into '_uploads' with vault_stage_media_upload before relying on browser upload.",
+    );
     expect(prompt).toContain("## Web Research");
     expect(prompt).toContain("use vault_web_search_duckduckgo first");
     expect(prompt).toContain("Use vault_web_fetch after search");

@@ -116,6 +116,7 @@ export function registerPairingCli(program: Command) {
     .description("Approve a pairing code and allow that sender")
     .option("--channel <channel>", `Channel (${channels.join(", ")})`)
     .option("--account <accountId>", "Account id (for multi-account channels)")
+    .option("--owner", "Also add the approved sender to commands.ownerAllowFrom", false)
     .argument("<codeOrChannel>", "Pairing code (or channel when using 2 args)")
     .argument("[code]", "Pairing code (when channel is passed as the 1st arg)")
     .option("--notify", "Notify the requester on the same channel", false)
@@ -139,10 +140,12 @@ export function registerPairingCli(program: Command) {
             channel,
             code: String(resolvedCode),
             accountId,
+            owner: opts.owner === true,
           })
         : await approveChannelPairingCode({
             channel,
             code: String(resolvedCode),
+            owner: opts.owner === true,
           });
       if (!approved) {
         throw new Error(`No pending pairing request found for code: ${String(resolvedCode)}`);

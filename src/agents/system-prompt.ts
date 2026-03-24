@@ -488,19 +488,31 @@ function buildVaultBrowserSection(params: {
     .filter((tool) => tool.startsWith("vault_browser_"))
     .toSorted()
     .map((tool) => params.resolveToolName(tool));
+  const uploadStageTools = params.availableTools.has("vault_stage_media_upload")
+    ? [params.resolveToolName("vault_stage_media_upload")]
+    : [];
   const approvalTools = params.availableTools.has("vault_approve_domain")
     ? [params.resolveToolName("vault_approve_domain")]
     : [];
-  if (browserTools.length === 0 && approvalTools.length === 0) {
+  if (browserTools.length === 0 && approvalTools.length === 0 && uploadStageTools.length === 0) {
     return [];
   }
   return [
     "## Vault Browser & Domain Approval",
     ...(approvalTools.length > 0 ? [`Approval tools: ${approvalTools.join(", ")}.`] : []),
+    ...(uploadStageTools.length > 0
+      ? [`Upload staging tools: ${uploadStageTools.join(", ")}.`]
+      : []),
     ...(browserTools.length > 0 ? [`Browser tools: ${browserTools.join(", ")}.`] : []),
     ...(approvalTools.length > 0
       ? [
           "Use vault_approve_domain when a web fetch or browser task is blocked on domain approval instead of failing silently or asking the user for raw URLs again.",
+        ]
+      : []),
+    ...(uploadStageTools.length > 0
+      ? [
+          "If an image or file comes from inbound vault media (for example a Telegram photo exposed as a vault /media URL), stage it into '_uploads' with vault_stage_media_upload before relying on browser upload.",
+          "If the source is already a vault /media URL, vault_browser_upload can also auto-stage it, but explicit staging is preferred when you want a reusable upload path.",
         ]
       : []),
     ...(browserTools.length > 0
@@ -955,6 +967,8 @@ export function buildAgentSystemPrompt(params: {
     vault_browser_tabs: "Switch or inspect vault browser tabs",
     vault_browser_pdf: "Save the current vault browser page as PDF",
     vault_browser_dialog: "Handle browser dialogs in the vault browser",
+    vault_stage_media_upload:
+      "Stage inbound vault media into '_uploads' so it can be used for browser uploads",
     vault_browser_upload: "Upload a file through the vault browser",
     vault_browser_status: "Check vault browser status",
     vault_browser_start: "Start the vault browser service",
