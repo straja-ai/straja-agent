@@ -14,16 +14,158 @@ import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
  */
 export type PromptMode = "full" | "minimal" | "none";
 
+function buildGroupedToolingLines(params: {
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+  summarizeTool: (normalized: string) => string | undefined;
+}) {
+  const groups: Array<{ title: string; tools: string[] }> = [
+    {
+      title: "Core",
+      tools: ["message", "gateway", "agents_list", "nodes", "image", "vault_cron"],
+    },
+    {
+      title: "Sessions & Delegation",
+      tools: [
+        "sessions_list",
+        "sessions_history",
+        "sessions_send",
+        "sessions_spawn",
+        "subagents",
+        "session_status",
+      ],
+    },
+    {
+      title: "Vault Knowledge",
+      tools: ["vault_search", "vault_get", "vault_multi_get", "vault_status"],
+    },
+    {
+      title: "Vault Memory",
+      tools: ["vault_memory_search", "vault_memory_get", "vault_memory_write"],
+    },
+    {
+      title: "Notes & Collections",
+      tools: [
+        "vault_note_create",
+        "vault_note_update",
+        "vault_agent_collection_create",
+        "vault_agent_collection_write",
+        "vault_collection_write",
+        "vault_agent_collection_list",
+      ],
+    },
+    {
+      title: "Spreadsheets",
+      tools: ["vault_spreadsheet_get", "vault_spreadsheet_match", "vault_spreadsheet_update"],
+    },
+    {
+      title: "Artifacts & Deliverables",
+      tools: [
+        "vault_artifact_write",
+        "vault_artifact_list",
+        "vault_artifact_url",
+        "vault_report_build",
+        "vault_presentation_build",
+      ],
+    },
+    {
+      title: "Calendar & Mail",
+      tools: [
+        "vault_gcalendar_create_event",
+        "vault_gcalendar_update_event",
+        "vault_gcalendar_delete_event",
+        "vault_gmail_create_draft",
+        "vault_gmail_update_draft",
+      ],
+    },
+    {
+      title: "Web & Browser",
+      tools: [
+        "vault_web_search_duckduckgo",
+        "vault_web_fetch",
+        "vault_approve_domain",
+        "vault_browser_navigate",
+        "vault_browser_snapshot",
+        "vault_browser_click",
+        "vault_browser_type",
+        "vault_browser_fill",
+        "vault_browser_select",
+        "vault_browser_hover",
+        "vault_browser_press_key",
+        "vault_browser_screenshot",
+        "vault_browser_tab_list",
+        "vault_browser_tab_new",
+        "vault_browser_tab_close",
+        "vault_browser_tabs",
+        "vault_browser_pdf",
+        "vault_browser_dialog",
+        "vault_browser_upload",
+        "vault_browser_status",
+        "vault_browser_start",
+        "vault_browser_stop",
+        "vault_browser_console",
+        "vault_browser_wait",
+      ],
+    },
+    {
+      title: "Developer & GitHub",
+      tools: [
+        "vault_repo_exec",
+        "vault_repos_list",
+        "vault_process",
+        "vault_github_create_issue",
+        "vault_github_list_issues",
+        "vault_github_create_branch",
+        "vault_github_create_pr",
+        "vault_github_list_prs",
+        "vault_github_push",
+      ],
+    },
+  ];
+
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    const present = group.tools.filter((tool) => params.availableTools.has(tool));
+    if (present.length === 0) {
+      continue;
+    }
+    lines.push(`### ${group.title}`);
+    for (const tool of present) {
+      seen.add(tool);
+      const name = params.resolveToolName(tool);
+      const summary = params.summarizeTool(tool);
+      lines.push(summary ? `- ${name}: ${summary}` : `- ${name}`);
+    }
+    lines.push("");
+  }
+
+  const extras = Array.from(params.availableTools)
+    .filter((tool) => !seen.has(tool))
+    .toSorted();
+  if (extras.length > 0) {
+    lines.push("### Other");
+    for (const tool of extras) {
+      const name = params.resolveToolName(tool);
+      const summary = params.summarizeTool(tool);
+      lines.push(summary ? `- ${name}: ${summary}` : `- ${name}`);
+    }
+    lines.push("");
+  }
+
+  return lines;
+}
+
 function buildSkillsSection(params: {
   skillsPrompt?: string;
   isMinimal: boolean;
-  readToolName: string;
+  readToolName?: string;
 }) {
   if (params.isMinimal) {
     return [];
   }
   const trimmed = params.skillsPrompt?.trim();
-  if (!trimmed) {
+  if (!trimmed || !params.readToolName) {
     return [];
   }
   return [
@@ -69,15 +211,6 @@ function buildMemorySection(params: {
     "## Memory Persistence",
     `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
   ];
-  if (hasVaultSearch) {
-    lines.push(
-      "",
-      "## Vault Knowledge Search",
-      "You have access to a document vault containing imported emails, documents, books, and other data sources.",
-      "When the user asks about information that could be in their documents or emails (events, schedules, receipts, newsletters, correspondence, etc.), use vault_search to find relevant content. Then use vault_get to read the full document if needed.",
-      "Prefer vault_search over external tools (web search, exec, etc.) when the answer is likely in the user's own data.",
-    );
-  }
   if (params.availableTools.has("vault_gmail_create_draft")) {
     const hasUpdate = params.availableTools.has("vault_gmail_update_draft");
     lines.push(
@@ -104,6 +237,279 @@ function buildMemorySection(params: {
   }
   lines.push("");
   return lines;
+}
+
+function buildVaultKnowledgeSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  if (!params.availableTools.has("vault_search")) {
+    return [];
+  }
+  const toolNames = [
+    params.resolveToolName("vault_search"),
+    params.resolveToolName("vault_get"),
+    ...(params.availableTools.has("vault_multi_get")
+      ? [params.resolveToolName("vault_multi_get")]
+      : []),
+    ...(params.availableTools.has("vault_status") ? [params.resolveToolName("vault_status")] : []),
+  ];
+  return [
+    "## Vault Knowledge Search",
+    `Core tools: ${toolNames.join(", ")}.`,
+    "You have access to a document vault containing imported emails, documents, books, notes, and other user data sources.",
+    "When the user asks about information that could be in their own documents, notes, collections, student records, or emails, use vault_search to find relevant content. Then use vault_get to read the full document if needed.",
+    ...(params.availableTools.has("vault_multi_get")
+      ? [
+          "Use vault_multi_get when you already have several relevant hits and need to inspect multiple documents together.",
+        ]
+      : []),
+    ...(params.availableTools.has("vault_status")
+      ? [
+          "Use vault_status to check vault readiness or health before concluding that the vault is unavailable.",
+        ]
+      : []),
+    "Prefer vault_search over external tools and general reasoning when the answer is likely in the user's own data.",
+    "If the user explicitly says to search the vault, collections, notes, student records, or documents, do not use exec, vault_exec, or repo-exec as the first lookup step.",
+    "Do not delegate vault or collection retrieval to software-engineer or other subagents. Handle vault_search, vault_get, spreadsheet lookup, notes, and collection inspection directly unless the user explicitly asks for repo/code work.",
+    "Do not claim the information is unavailable until you have actually tried vault_search (and vault_get if there are relevant hits).",
+    "",
+  ];
+}
+
+function buildVaultCollectionsSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  const noteTools = [
+    ...(params.availableTools.has("vault_note_create")
+      ? [params.resolveToolName("vault_note_create")]
+      : []),
+    ...(params.availableTools.has("vault_note_update")
+      ? [params.resolveToolName("vault_note_update")]
+      : []),
+  ];
+  const collectionTools = [
+    ...(params.availableTools.has("vault_agent_collection_create")
+      ? [params.resolveToolName("vault_agent_collection_create")]
+      : []),
+    ...(params.availableTools.has("vault_agent_collection_write")
+      ? [params.resolveToolName("vault_agent_collection_write")]
+      : []),
+    ...(params.availableTools.has("vault_collection_write")
+      ? [params.resolveToolName("vault_collection_write")]
+      : []),
+    ...(params.availableTools.has("vault_agent_collection_list")
+      ? [params.resolveToolName("vault_agent_collection_list")]
+      : []),
+  ];
+  if (noteTools.length === 0 && collectionTools.length === 0) {
+    return [];
+  }
+  const lines = ["## Vault Notes & Collections"];
+  if (noteTools.length > 0) {
+    lines.push(`Note tools: ${noteTools.join(", ")}.`);
+    lines.push(
+      "Use note tools for standalone notes and markdown-like records that belong in the vault note space rather than a spreadsheet or artifact.",
+    );
+  }
+  if (collectionTools.length > 0) {
+    lines.push(`Collection tools: ${collectionTools.join(", ")}.`);
+    lines.push(
+      "Use vault_collection_write to create or update normal collection documents at an explicit collection path.",
+    );
+    lines.push(
+      "Use vault_agent_collection_create, vault_agent_collection_write, and vault_agent_collection_list only for agent-owned collections and their structured documents.",
+    );
+  }
+  lines.push(
+    "Prefer collection and note tools over inventing file-system paths or asking the user to upload data that is already in the vault.",
+  );
+  lines.push("");
+  return lines;
+}
+
+function buildVaultArtifactsSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  const tools = [
+    ...(params.availableTools.has("vault_artifact_write")
+      ? [params.resolveToolName("vault_artifact_write")]
+      : []),
+    ...(params.availableTools.has("vault_artifact_list")
+      ? [params.resolveToolName("vault_artifact_list")]
+      : []),
+    ...(params.availableTools.has("vault_artifact_url")
+      ? [params.resolveToolName("vault_artifact_url")]
+      : []),
+    ...(params.availableTools.has("vault_report_build")
+      ? [params.resolveToolName("vault_report_build")]
+      : []),
+    ...(params.availableTools.has("vault_presentation_build")
+      ? [params.resolveToolName("vault_presentation_build")]
+      : []),
+  ];
+  if (tools.length === 0) {
+    return [];
+  }
+  return [
+    "## Vault Artifacts",
+    `Artifact tools: ${tools.join(", ")}.`,
+    "Use vault_artifact_write to store source specs or supporting assets in the vault artifact space.",
+    ...(params.availableTools.has("vault_artifact_list")
+      ? [
+          "Use vault_artifact_list to inspect what deliverables or generated files already exist before creating duplicates.",
+        ]
+      : []),
+    ...(params.availableTools.has("vault_artifact_url")
+      ? [
+          "Use vault_artifact_url to turn a vault artifact into a user-deliverable link instead of exposing internal vault paths.",
+        ]
+      : []),
+    "",
+  ];
+}
+
+function buildVaultSpreadsheetsSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  const tools = [
+    ...(params.availableTools.has("vault_spreadsheet_get")
+      ? [params.resolveToolName("vault_spreadsheet_get")]
+      : []),
+    ...(params.availableTools.has("vault_spreadsheet_match")
+      ? [params.resolveToolName("vault_spreadsheet_match")]
+      : []),
+    ...(params.availableTools.has("vault_spreadsheet_update")
+      ? [params.resolveToolName("vault_spreadsheet_update")]
+      : []),
+  ];
+  if (tools.length === 0) {
+    return [];
+  }
+  const lines = ["## Vault Spreadsheets", `Spreadsheet tools: ${tools.join(", ")}.`];
+  if (params.availableTools.has("vault_spreadsheet_get")) {
+    lines.push(
+      "Use vault_spreadsheet_get to inspect a spreadsheet-backed document before summarizing or editing it.",
+    );
+  }
+  if (params.availableTools.has("vault_spreadsheet_match")) {
+    lines.push(
+      "Use vault_spreadsheet_match to find rows by names, phone numbers, ids, or other structured values instead of relying on free-text search.",
+    );
+  }
+  if (params.availableTools.has("vault_spreadsheet_update")) {
+    lines.push(
+      "Use vault_spreadsheet_update for spreadsheet-backed mutations so the structured document and regenerated spreadsheet stay in sync.",
+    );
+  }
+  lines.push(
+    "Prefer spreadsheet tools over generic collection writes when the source document is spreadsheet-backed.",
+  );
+  lines.push("");
+  return lines;
+}
+
+function buildVaultCalendarSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  const tools = [
+    ...(params.availableTools.has("vault_gcalendar_create_event")
+      ? [params.resolveToolName("vault_gcalendar_create_event")]
+      : []),
+    ...(params.availableTools.has("vault_gcalendar_update_event")
+      ? [params.resolveToolName("vault_gcalendar_update_event")]
+      : []),
+    ...(params.availableTools.has("vault_gcalendar_delete_event")
+      ? [params.resolveToolName("vault_gcalendar_delete_event")]
+      : []),
+  ];
+  if (tools.length === 0) {
+    return [];
+  }
+  return [
+    "## Vault Calendar",
+    `Calendar tools: ${tools.join(", ")}.`,
+    "Use calendar tools for real schedule changes, not just for discussing dates in chat.",
+    "Confirm destructive calendar changes when deleting or materially altering an event unless the user has already asked for that exact change.",
+    "",
+  ];
+}
+
+function buildVaultAutomationSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal || !params.availableTools.has("vault_cron")) {
+    return [];
+  }
+  return [
+    "## Vault Automation",
+    `Automation tool: ${params.resolveToolName("vault_cron")}.`,
+    "Use vault_cron for reminders, delayed follow-ups, recurring checks, and scheduled wakeups.",
+    "When scheduling a reminder, write the reminder text so it reads naturally when it fires; include enough context for the future message to make sense on its own.",
+    "",
+  ];
+}
+
+function buildVaultBrowserSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+  const browserTools = Array.from(params.availableTools)
+    .filter((tool) => tool.startsWith("vault_browser_"))
+    .toSorted()
+    .map((tool) => params.resolveToolName(tool));
+  const approvalTools = params.availableTools.has("vault_approve_domain")
+    ? [params.resolveToolName("vault_approve_domain")]
+    : [];
+  if (browserTools.length === 0 && approvalTools.length === 0) {
+    return [];
+  }
+  return [
+    "## Vault Browser & Domain Approval",
+    ...(approvalTools.length > 0 ? [`Approval tools: ${approvalTools.join(", ")}.`] : []),
+    ...(browserTools.length > 0 ? [`Browser tools: ${browserTools.join(", ")}.`] : []),
+    ...(approvalTools.length > 0
+      ? [
+          "Use vault_approve_domain when a web fetch or browser task is blocked on domain approval instead of failing silently or asking the user for raw URLs again.",
+        ]
+      : []),
+    ...(browserTools.length > 0
+      ? [
+          "Use vault browser tools for interactive navigation, forms, JS-rendered pages, screenshots, uploads, dialogs, downloads, and tab control.",
+        ]
+      : []),
+    "",
+  ];
 }
 
 function buildUserIdentitySection(ownerLine: string | undefined, isMinimal: boolean) {
@@ -149,18 +555,24 @@ function buildMessagingSection(params: {
   }
   const crossSessionSendTool = params.availableTools.has("vault_sessions_send")
     ? "vault_sessions_send"
-    : "sessions_send";
+    : params.availableTools.has("sessions_send")
+      ? "sessions_send"
+      : null;
   const subagentsTool = params.availableTools.has("vault_subagents")
     ? "vault_subagents"
-    : "subagents";
+    : params.availableTools.has("subagents")
+      ? "subagents"
+      : null;
   return [
     "## Messaging",
     "- Reply in current session → automatically routes to the source channel (Signal, Telegram, etc.)",
-    `- Cross-session messaging → use ${crossSessionSendTool}(sessionKey, message)`,
-    `- Sub-agent orchestration → use ${subagentsTool}(action=list|steer|kill)`,
+    crossSessionSendTool
+      ? `- Cross-session messaging → use ${crossSessionSendTool}(sessionKey, message)`
+      : "",
+    subagentsTool ? `- Sub-agent orchestration → use ${subagentsTool}(action=list|steer|kill)` : "",
     "- `[System Message] ...` blocks are internal context and are not user-visible by default.",
     `- If a \`[System Message]\` reports completed cron/subagent work and asks for a user update, rewrite it in your normal assistant voice and send that update (do not forward raw system text or default to ${SILENT_REPLY_TOKEN}).`,
-    "- Never use exec/curl for provider messaging; OpenClaw handles all routing internally.",
+    "- Never use exec/curl for provider messaging; Straja handles all routing internally.",
     params.availableTools.has("message")
       ? [
           "",
@@ -194,19 +606,23 @@ function buildVoiceSection(params: { isMinimal: boolean; ttsHint?: string }) {
   return ["## Voice (TTS)", hint, ""];
 }
 
-function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readToolName: string }) {
+function buildDocsSection(params: {
+  docsPath?: string;
+  isMinimal: boolean;
+  readToolName?: string;
+}) {
   const docsPath = params.docsPath?.trim();
-  if (!docsPath || params.isMinimal) {
+  if (!docsPath || params.isMinimal || !params.readToolName) {
     return [];
   }
   return [
     "## Documentation",
-    `OpenClaw docs: ${docsPath}`,
+    `Straja docs: ${docsPath}`,
     "Mirror: https://docs.openclaw.ai",
     "Source: https://github.com/openclaw/openclaw",
     "Community: https://discord.com/invite/clawd",
     "Find new skills: https://clawhub.com",
-    "For OpenClaw behavior, commands, config, or architecture: consult local docs first.",
+    "For Straja behavior, commands, config, or architecture: consult local docs first.",
     "When diagnosing issues, run `openclaw status` yourself when possible; only ask the user if you lack access (e.g., sandboxed).",
     "",
   ];
@@ -311,7 +727,7 @@ function buildWebResearchSection(params: {
 
   if (hasBrowser) {
     lines.push(
-      "Use browser tools only when a task needs interactive browsing: login/auth flows, forms, clicks, multi-step navigation, JS-rendered pages, screenshots, downloads, or site interactions that search/fetch cannot handle.",
+      "Escalate to vault browser tools only when the task requires interactive browsing that search/fetch cannot handle.",
     );
   }
 
@@ -321,6 +737,83 @@ function buildWebResearchSection(params: {
     );
   }
 
+  lines.push("");
+  return lines;
+}
+
+function buildDeveloperSection(params: {
+  isMinimal: boolean;
+  availableTools: Set<string>;
+  resolveToolName: (normalized: string) => string;
+}) {
+  if (params.isMinimal) {
+    return [];
+  }
+
+  const repoTools = [
+    ...(params.availableTools.has("vault_repos_list")
+      ? [params.resolveToolName("vault_repos_list")]
+      : []),
+    ...(params.availableTools.has("vault_repo_exec")
+      ? [params.resolveToolName("vault_repo_exec")]
+      : []),
+    ...(params.availableTools.has("vault_process")
+      ? [params.resolveToolName("vault_process")]
+      : []),
+  ];
+  const githubTools = [
+    ...(params.availableTools.has("vault_github_create_issue")
+      ? [params.resolveToolName("vault_github_create_issue")]
+      : []),
+    ...(params.availableTools.has("vault_github_list_issues")
+      ? [params.resolveToolName("vault_github_list_issues")]
+      : []),
+    ...(params.availableTools.has("vault_github_create_branch")
+      ? [params.resolveToolName("vault_github_create_branch")]
+      : []),
+    ...(params.availableTools.has("vault_github_create_pr")
+      ? [params.resolveToolName("vault_github_create_pr")]
+      : []),
+    ...(params.availableTools.has("vault_github_list_prs")
+      ? [params.resolveToolName("vault_github_list_prs")]
+      : []),
+    ...(params.availableTools.has("vault_github_push")
+      ? [params.resolveToolName("vault_github_push")]
+      : []),
+  ];
+
+  if (repoTools.length === 0 && githubTools.length === 0) {
+    return [];
+  }
+
+  const lines = ["## Repo Engineering"];
+  if (repoTools.length > 0) {
+    lines.push(`Repo tools: ${repoTools.join(", ")}.`);
+    if (params.availableTools.has("vault_repos_list")) {
+      lines.push(
+        "Use vault_repos_list first when you need to discover which attached repositories are available.",
+      );
+    }
+    if (params.availableTools.has("vault_repo_exec")) {
+      lines.push(
+        "Use vault_repo_exec for repository-local coding work such as searching code, reading project files, running git, installing dependencies, building, and testing.",
+      );
+    }
+    if (params.availableTools.has("vault_process")) {
+      lines.push(
+        "Use vault_process to monitor, poll, or manage background repo execution sessions started through the vault.",
+      );
+    }
+  }
+  if (githubTools.length > 0) {
+    lines.push(`GitHub tools: ${githubTools.join(", ")}.`);
+    lines.push(
+      "Use GitHub tools for repository hosting actions like issues, branches, pull requests, and pushes instead of merely describing those actions.",
+    );
+  }
+  lines.push(
+    "Prefer repo-engineering tools over vault knowledge-search tools when the task is clearly about code, repository state, git history, builds, tests, or GitHub workflow.",
+  );
   lines.push("");
   return lines;
 }
@@ -401,9 +894,9 @@ export function buildAgentSystemPrompt(params: {
     browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
     nodes: "List/describe/notify/camera/screen on paired nodes",
-    cron: "Manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
+    vault_cron: "Manage reminders, schedules, and wake events inside the vault runtime",
     message: "Send messages and channel actions",
-    gateway: "Restart, apply config, or run updates on the running OpenClaw process",
+    gateway: "Restart, apply config, or run updates on the running Straja process",
     agents_list: "List agent ids allowed for sessions_spawn",
     vault_agents_list: "List agent ids allowed for vault_sessions_spawn",
     sessions_list: "List other sessions (incl. sub-agents) with filters/last",
@@ -421,42 +914,65 @@ export function buildAgentSystemPrompt(params: {
     vault_session_status:
       "Show a /status-equivalent status card (usage + time + Reasoning/Verbose/Elevated); use for model-use questions (📊 vault_session_status); optional per-session model override",
     image: "Analyze an image with the configured image model",
+    vault_note_create: "Create a note in the vault note space",
+    vault_note_update: "Update an existing vault note",
+    vault_agent_collection_create: "Create an agent-owned collection",
+    vault_agent_collection_write: "Write a document inside an agent-owned collection",
+    vault_collection_write: "Write a document directly to a normal vault collection path",
+    vault_agent_collection_list: "List agent-owned collections",
+    vault_artifact_write: "Store an artifact or artifact source file in the vault",
+    vault_artifact_list: "List existing vault artifacts",
+    vault_artifact_url: "Get a deliverable URL for a vault artifact",
+    vault_presentation_build: "Build a presentation artifact from a stored spec",
+    vault_report_build: "Build a report artifact from a stored spec",
+    vault_gcalendar_create_event: "Create a Google Calendar event through the vault",
+    vault_gcalendar_update_event: "Update a Google Calendar event through the vault",
+    vault_gcalendar_delete_event: "Delete a Google Calendar event through the vault",
+    vault_gmail_create_draft: "Create a Gmail draft through the vault",
+    vault_gmail_update_draft: "Update an existing Gmail draft through the vault",
+    vault_search: "Search the user's vault documents, notes, and collections",
+    vault_get: "Read a vault document by path",
+    vault_multi_get: "Read several vault documents in one call",
+    vault_status: "Check vault availability and health",
+    vault_spreadsheet_get: "Read a spreadsheet-backed vault document",
+    vault_spreadsheet_match: "Find structured rows inside a spreadsheet-backed vault document",
+    vault_spreadsheet_update: "Update a spreadsheet-backed vault document and regenerate the sheet",
+    vault_memory_search: "Search persistent memory stored in the vault",
+    vault_memory_get: "Read memory entries stored in the vault",
+    vault_memory_write: "Write persistent memory to the vault",
+    vault_browser_navigate: "Open a URL in the vault browser",
+    vault_browser_snapshot: "Capture the current vault browser page state",
+    vault_browser_click: "Click an element in the vault browser",
+    vault_browser_type: "Type into the vault browser",
+    vault_browser_fill: "Fill a form field in the vault browser",
+    vault_browser_select: "Select an option in the vault browser",
+    vault_browser_hover: "Hover an element in the vault browser",
+    vault_browser_press_key: "Send a key press in the vault browser",
+    vault_browser_screenshot: "Take a screenshot in the vault browser",
+    vault_browser_tab_list: "List open vault browser tabs",
+    vault_browser_tab_new: "Open a new vault browser tab",
+    vault_browser_tab_close: "Close a vault browser tab",
+    vault_browser_tabs: "Switch or inspect vault browser tabs",
+    vault_browser_pdf: "Save the current vault browser page as PDF",
+    vault_browser_dialog: "Handle browser dialogs in the vault browser",
+    vault_browser_upload: "Upload a file through the vault browser",
+    vault_browser_status: "Check vault browser status",
+    vault_browser_start: "Start the vault browser service",
+    vault_browser_stop: "Stop the vault browser service",
+    vault_browser_console: "Inspect vault browser console output",
+    vault_browser_wait: "Wait for a selector, URL, or condition in the vault browser",
+    vault_approve_domain: "Approve a web domain for vault fetch/browser access",
+    vault_repo_exec:
+      "Run commands inside an attached local repository through the vault repo execution proxy",
+    vault_repos_list: "List attached repositories available to the repo execution proxy",
+    vault_process: "Manage background repo execution sessions started through the vault",
+    vault_github_create_issue: "Create a GitHub issue through the vault",
+    vault_github_list_issues: "List GitHub issues through the vault",
+    vault_github_create_branch: "Create a GitHub branch through the vault",
+    vault_github_create_pr: "Create a GitHub pull request through the vault",
+    vault_github_list_prs: "List GitHub pull requests through the vault",
+    vault_github_push: "Push local repository changes through the vault",
   };
-
-  const toolOrder = [
-    "read",
-    "write",
-    "edit",
-    "apply_patch",
-    "grep",
-    "find",
-    "ls",
-    "exec",
-    "process",
-    "web_search",
-    "web_fetch",
-    "browser",
-    "canvas",
-    "nodes",
-    "vault_cron",
-    "message",
-    "gateway",
-    "agents_list",
-    "vault_agents_list",
-    "sessions_list",
-    "vault_sessions_list",
-    "sessions_history",
-    "vault_sessions_history",
-    "sessions_send",
-    "vault_sessions_send",
-    "sessions_spawn",
-    "vault_sessions_spawn",
-    "subagents",
-    "vault_subagents",
-    "session_status",
-    "vault_session_status",
-    "image",
-  ];
 
   const rawToolNames = (params.toolNames ?? []).map((tool) => tool.trim());
   const canonicalToolNames = rawToolNames.filter(Boolean);
@@ -481,59 +997,35 @@ export function buildAgentSystemPrompt(params: {
     }
     externalToolSummaries.set(normalized, value.trim());
   }
-  const extraTools = Array.from(
-    new Set(normalizedTools.filter((tool) => !toolOrder.includes(tool))),
-  );
-  const enabledTools = toolOrder.filter((tool) => availableTools.has(tool));
-  const toolLines = enabledTools.map((tool) => {
-    const summary = coreToolSummaries[tool] ?? externalToolSummaries.get(tool);
-    const name = resolveToolName(tool);
-    return summary ? `- ${name}: ${summary}` : `- ${name}`;
+  const summarizeTool = (tool: string) =>
+    coreToolSummaries[tool] ?? externalToolSummaries.get(tool);
+  const toolLines = buildGroupedToolingLines({
+    availableTools,
+    resolveToolName,
+    summarizeTool,
   });
-  for (const tool of extraTools.toSorted()) {
-    const summary = coreToolSummaries[tool] ?? externalToolSummaries.get(tool);
-    const name = resolveToolName(tool);
-    toolLines.push(summary ? `- ${name}: ${summary}` : `- ${name}`);
-  }
 
   const hasGateway = availableTools.has("gateway");
   const readToolName = resolveToolName("read");
   const execToolName = resolveToolName("exec");
   const processToolName = resolveToolName("process");
-  const resolvePreferredToolName = (
-    primary: string,
-    secondary: string,
-    fallback: string,
-  ): string => {
+  const resolvePreferredToolName = (primary: string, secondary: string): string | null => {
     if (availableTools.has(primary)) {
       return resolveToolName(primary);
     }
     if (availableTools.has(secondary)) {
       return resolveToolName(secondary);
     }
-    return fallback;
+    return null;
   };
-  const sessionsListToolName = resolvePreferredToolName(
-    "vault_sessions_list",
-    "sessions_list",
-    "sessions_list",
-  );
+  const sessionsListToolName = resolvePreferredToolName("vault_sessions_list", "sessions_list");
   const sessionsHistoryToolName = resolvePreferredToolName(
     "vault_sessions_history",
     "sessions_history",
-    "sessions_history",
   );
-  const sessionsSendToolName = resolvePreferredToolName(
-    "vault_sessions_send",
-    "sessions_send",
-    "sessions_send",
-  );
-  const subagentsToolName = resolvePreferredToolName("vault_subagents", "subagents", "subagents");
-  const sessionStatusToolName = resolvePreferredToolName(
-    "vault_session_status",
-    "session_status",
-    "session_status",
-  );
+  const sessionsSendToolName = resolvePreferredToolName("vault_sessions_send", "sessions_send");
+  const subagentsToolName = resolvePreferredToolName("vault_subagents", "subagents");
+  const sessionStatusToolName = resolvePreferredToolName("vault_session_status", "session_status");
   const extraSystemPrompt = params.extraSystemPrompt?.trim();
   const ownerNumbers = (params.ownerNumbers ?? []).map((value) => value.trim()).filter(Boolean);
   const ownerLine =
@@ -574,14 +1066,33 @@ export function buildAgentSystemPrompt(params: {
   const sanitizedSandboxContainerWorkspace = sandboxContainerWorkspace
     ? sanitizeForPromptLiteral(sandboxContainerWorkspace)
     : "";
+  const hasReadTool = availableTools.has("read");
+  const hasFileEditTools =
+    hasReadTool ||
+    availableTools.has("write") ||
+    availableTools.has("edit") ||
+    availableTools.has("apply_patch");
+  const hasExecTool = availableTools.has("exec");
+  const hasProcessTool = availableTools.has("process");
+  const hasSubagentTool = availableTools.has("subagents") || availableTools.has("vault_subagents");
+  const hasSessionsListTool =
+    availableTools.has("sessions_list") || availableTools.has("vault_sessions_list");
   const displayWorkspaceDir =
     params.sandboxInfo?.enabled && sanitizedSandboxContainerWorkspace
       ? sanitizedSandboxContainerWorkspace
       : sanitizedWorkspaceDir;
   const workspaceGuidance =
     params.sandboxInfo?.enabled && sanitizedSandboxContainerWorkspace
-      ? `For read/write/edit/apply_patch, file paths resolve against host workspace: ${sanitizedWorkspaceDir}. For bash/exec commands, use sandbox container paths under ${sanitizedSandboxContainerWorkspace} (or relative paths from that workdir), not host paths. Prefer relative paths so both sandboxed exec and file tools work consistently.`
-      : "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.";
+      ? hasFileEditTools && hasExecTool
+        ? `For read/write/edit/apply_patch, file paths resolve against host workspace: ${sanitizedWorkspaceDir}. For bash/exec commands, use sandbox container paths under ${sanitizedSandboxContainerWorkspace} (or relative paths from that workdir), not host paths. Prefer relative paths so both sandboxed exec and file tools work consistently.`
+        : hasFileEditTools
+          ? `File tool paths resolve against host workspace: ${sanitizedWorkspaceDir}.`
+          : hasExecTool
+            ? `For bash/exec commands, use sandbox container paths under ${sanitizedSandboxContainerWorkspace} (or relative paths from that workdir), not host paths.`
+            : "This runtime relies on vault/native tools rather than local workspace file or exec tools."
+      : hasFileEditTools
+        ? "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise."
+        : "This workspace path is reference context only; prefer the available vault/native tools in this runtime.";
   const safetySection = [
     "## Safety",
     "You have no independent goals: do not pursue self-preservation, replication, resource acquisition, or power-seeking; avoid long-term plans beyond the user's request.",
@@ -592,12 +1103,52 @@ export function buildAgentSystemPrompt(params: {
   const skillsSection = buildSkillsSection({
     skillsPrompt,
     isMinimal,
-    readToolName,
+    readToolName: hasReadTool ? readToolName : undefined,
   });
   const memorySection = buildMemorySection({
     isMinimal,
     availableTools,
     citationsMode: params.memoryCitationsMode,
+  });
+  const vaultKnowledgeSection = buildVaultKnowledgeSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultCollectionsSection = buildVaultCollectionsSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultArtifactsSection = buildVaultArtifactsSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultSpreadsheetsSection = buildVaultSpreadsheetsSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultCalendarSection = buildVaultCalendarSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultAutomationSection = buildVaultAutomationSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const vaultBrowserSection = buildVaultBrowserSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
+  });
+  const developerSection = buildDeveloperSection({
+    isMinimal,
+    availableTools,
+    resolveToolName,
   });
   const deliverablesSection = buildDeliverablesSection({
     isMinimal,
@@ -611,17 +1162,36 @@ export function buildAgentSystemPrompt(params: {
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
     isMinimal,
-    readToolName,
+    readToolName: hasReadTool ? readToolName : undefined,
   });
+  const longWaitGuidance =
+    hasExecTool && hasProcessTool
+      ? `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`
+      : hasExecTool
+        ? `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs.`
+        : hasSubagentTool
+          ? "For long waits, avoid rapid poll loops; prefer push-based sub-agents and check status only on-demand."
+          : "";
+  const subagentGuidance = hasSubagentTool
+    ? "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done."
+    : "";
+  const pollingGuidance =
+    hasSubagentTool && hasSessionsListTool
+      ? `Do not poll \`${subagentsToolName} list\` / \`${sessionsListToolName}\` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).`
+      : hasSubagentTool
+        ? `Do not poll \`${subagentsToolName} list\` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).`
+        : hasSessionsListTool
+          ? `Do not poll \`${sessionsListToolName}\` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).`
+          : "";
   const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
 
   // For "none" mode, return just the basic identity line
   if (promptMode === "none") {
-    return "You are a personal assistant running inside OpenClaw.";
+    return "You are a personal assistant running inside Straja.";
   }
 
   const lines = [
-    "You are a personal assistant running inside OpenClaw.",
+    "You are a personal assistant running inside Straja.",
     "",
     "## Tooling",
     "Tool availability (filtered by policy):",
@@ -636,20 +1206,24 @@ export function buildAgentSystemPrompt(params: {
           "- apply_patch: apply multi-file patches",
           `- ${execToolName}: run shell commands (supports background via yieldMs/background)`,
           `- ${processToolName}: manage background exec sessions`,
-          "- browser: control OpenClaw's dedicated browser",
+          "- browser: control Straja's dedicated browser",
           "- canvas: present/eval/snapshot the Canvas",
           "- nodes: list/describe/notify/camera/screen on paired nodes",
           "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
-          `- ${sessionsListToolName}: list sessions`,
-          `- ${sessionsHistoryToolName}: fetch session history`,
-          `- ${sessionsSendToolName}: send to another session`,
-          `- ${subagentsToolName}: list/steer/kill sub-agent runs`,
-          `- ${sessionStatusToolName}: show usage/time/model state and answer "what model are we using?"`,
-        ].join("\n"),
+          sessionsListToolName ? `- ${sessionsListToolName}: list sessions` : "",
+          sessionsHistoryToolName ? `- ${sessionsHistoryToolName}: fetch session history` : "",
+          sessionsSendToolName ? `- ${sessionsSendToolName}: send to another session` : "",
+          subagentsToolName ? `- ${subagentsToolName}: list/steer/kill sub-agent runs` : "",
+          sessionStatusToolName
+            ? `- ${sessionStatusToolName}: show usage/time/model state and answer "what model are we using?"`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
-    `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
-    "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
-    `Do not poll \`${subagentsToolName} list\` / \`${sessionsListToolName}\` in a loop; only check status on-demand (for intervention, debugging, or when explicitly asked).`,
+    longWaitGuidance,
+    subagentGuidance,
+    pollingGuidance,
     "",
     "## Tool Call Style",
     "Default: do not narrate routine, low-risk tool calls (just call the tool).",
@@ -658,8 +1232,8 @@ export function buildAgentSystemPrompt(params: {
     "Use plain human language for narration unless in a technical context.",
     "",
     ...safetySection,
-    "## OpenClaw CLI Quick Reference",
-    "OpenClaw is controlled via subcommands. Do not invent commands.",
+    "## Straja CLI Quick Reference",
+    "Straja is controlled via subcommands. Do not invent commands.",
     "To manage the Gateway daemon service (start/stop/restart):",
     "- openclaw gateway status",
     "- openclaw gateway start",
@@ -669,16 +1243,24 @@ export function buildAgentSystemPrompt(params: {
     "",
     ...skillsSection,
     ...memorySection,
+    ...vaultKnowledgeSection,
+    ...vaultCollectionsSection,
+    ...vaultArtifactsSection,
+    ...vaultSpreadsheetsSection,
+    ...vaultCalendarSection,
+    ...vaultAutomationSection,
+    ...vaultBrowserSection,
+    ...developerSection,
     ...deliverablesSection,
     ...webResearchSection,
     // Skip self-update for subagent/none modes
-    hasGateway && !isMinimal ? "## OpenClaw Self-Update" : "",
+    hasGateway && !isMinimal ? "## Straja Self-Update" : "",
     hasGateway && !isMinimal
       ? [
           "Get Updates (self-update) is ONLY allowed when the user explicitly asks for it.",
           "Do not run config.apply or update.run unless the user explicitly requests an update or config change; if it's not explicit, ask first.",
           "Actions: config.get, config.schema, config.apply (validate + write full config, then restart), update.run (update deps or git, then restart).",
-          "After restart, OpenClaw pings the last active session automatically.",
+          "After restart, Straja pings the last active session automatically.",
         ].join("\n")
       : "",
     hasGateway && !isMinimal ? "" : "",
@@ -694,7 +1276,7 @@ export function buildAgentSystemPrompt(params: {
       ? params.modelAliasLines.join("\n")
       : "",
     params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal ? "" : "",
-    userTimezone
+    userTimezone && sessionStatusToolName
       ? `If you need the current date, time, or day of week, run ${sessionStatusToolName} (📊 ${sessionStatusToolName}).`
       : "",
     "## Workspace",
@@ -753,7 +1335,7 @@ export function buildAgentSystemPrompt(params: {
       userTimezone,
     }),
     "## Workspace Files (injected)",
-    "These user-editable files are loaded by OpenClaw and included below in Project Context.",
+    "These user-editable files are loaded by Straja and included below in Project Context.",
     "",
     ...buildReplyTagsSection(isMinimal),
     ...buildMessagingSection({
@@ -847,7 +1429,7 @@ export function buildAgentSystemPrompt(params: {
       heartbeatPromptLine,
       "If you receive a heartbeat poll (a user message matching the heartbeat prompt above), and there is nothing that needs attention, reply exactly:",
       "HEARTBEAT_OK",
-      'OpenClaw treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).',
+      'Straja treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).',
       'If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.',
       "",
     );

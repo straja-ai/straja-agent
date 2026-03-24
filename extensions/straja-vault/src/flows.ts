@@ -49,6 +49,46 @@ function normalizeKey(value: unknown): string | undefined {
   return text ? text.toLowerCase() : undefined;
 }
 
+function normalizePhoneDigits(value: unknown): string {
+  return String(value ?? "").replace(/\D+/g, "");
+}
+
+function phoneMatchVariants(value: unknown): string[] {
+  const digits = normalizePhoneDigits(value);
+  if (digits.length < 7) {
+    return [];
+  }
+  const variants = new Set<string>([digits]);
+  if (digits.startsWith("00") && digits.length > 9) {
+    variants.add(digits.slice(2));
+  }
+  if (digits.startsWith("0") && digits.length > 8) {
+    variants.add(digits.slice(1));
+  }
+  return Array.from(variants).filter((entry) => entry.length >= 7);
+}
+
+function phoneLikeMatch(left: unknown, right: unknown): boolean {
+  const leftVariants = phoneMatchVariants(left);
+  const rightVariants = phoneMatchVariants(right);
+  if (leftVariants.length === 0 || rightVariants.length === 0) {
+    return false;
+  }
+  for (const leftValue of leftVariants) {
+    for (const rightValue of rightVariants) {
+      if (leftValue === rightValue) {
+        return true;
+      }
+      const [shorter, longer] =
+        leftValue.length <= rightValue.length ? [leftValue, rightValue] : [rightValue, leftValue];
+      if (shorter.length >= 7 && longer.endsWith(shorter)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function normalizeStringArray(value: unknown): string[] | undefined {
   if (typeof value === "string") {
     const single = normalizeKey(value);
@@ -187,7 +227,11 @@ function matchesFlow(flow: FlowDoc, event: FlowEvent, ctx: FlowContext): boolean
     }
   }
   if (flow.trigger.senders?.length) {
-    const matched = flow.trigger.senders.some((entry) => candidates.senders.has(entry));
+    const matched = flow.trigger.senders.some(
+      (entry) =>
+        candidates.senders.has(entry) ||
+        Array.from(candidates.senders).some((candidate) => phoneLikeMatch(entry, candidate)),
+    );
     if (!matched) {
       return false;
     }
