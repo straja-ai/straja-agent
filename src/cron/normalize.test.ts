@@ -246,6 +246,37 @@ describe("normalizeCronJobCreate", () => {
     expect(delivery.mode).toBe("announce");
   });
 
+  it("infers isolated sessionTarget for httpRequest payloads without forcing delivery", () => {
+    const normalized = normalizeCronJobCreate({
+      name: "http-request",
+      enabled: true,
+      schedule: { kind: "every", everyMs: 21_600_000 },
+      payload: {
+        kind: "httpRequest",
+        url: "  https://vault.example.invalid/tasks/tsk_123/run  ",
+        method: "post",
+        headers: {
+          " Content-Type ": "application/json",
+          Authorization: "Bearer test",
+        },
+        summary: "  Scheduled task  ",
+      },
+    }) as unknown as Record<string, unknown>;
+
+    expect(normalized.sessionTarget).toBe("isolated");
+    expect(normalized.delivery).toBeUndefined();
+
+    const payload = normalized.payload as Record<string, unknown>;
+    expect(payload.kind).toBe("httpRequest");
+    expect(payload.url).toBe("https://vault.example.invalid/tasks/tsk_123/run");
+    expect(payload.method).toBe("POST");
+    expect(payload.summary).toBe("Scheduled task");
+    expect(payload.headers).toEqual({
+      "Content-Type": "application/json",
+      Authorization: "Bearer test",
+    });
+  });
+
   it("migrates legacy delivery fields to delivery", () => {
     const normalized = normalizeCronJobCreate({
       name: "legacy deliver",
@@ -326,6 +357,7 @@ describe("normalizeCronJobCreate", () => {
       thinking: " high ",
       timeoutSeconds: 45,
       allowUnsafeExternalContent: true,
+      skipGuardModelChecks: true,
     }) as unknown as Record<string, unknown>;
 
     const payload = normalized.payload as Record<string, unknown>;
@@ -333,6 +365,7 @@ describe("normalizeCronJobCreate", () => {
     expect(payload.thinking).toBe("high");
     expect(payload.timeoutSeconds).toBe(45);
     expect(payload.allowUnsafeExternalContent).toBe(true);
+    expect(payload.skipGuardModelChecks).toBe(true);
   });
 
   it("preserves timeoutSeconds=0 for no-timeout agentTurn payloads", () => {

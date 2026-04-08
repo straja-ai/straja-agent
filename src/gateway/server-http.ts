@@ -79,6 +79,7 @@ type HookDispatchers = {
     thinking?: string;
     timeoutSeconds?: number;
     allowUnsafeExternalContent?: boolean;
+    skipGuardModelChecks?: boolean;
   }) => string;
 };
 

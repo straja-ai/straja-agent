@@ -231,6 +231,8 @@ export type HookAgentPayload = {
   model?: string;
   thinking?: string;
   timeoutSeconds?: number;
+  allowUnsafeExternalContent?: boolean;
+  skipGuardModelChecks?: boolean;
 };
 
 const listHookChannelValues = () => ["last", ...listChannelPlugins().map((plugin) => plugin.id)];
@@ -366,6 +368,8 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
     typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw) && timeoutRaw > 0
       ? Math.floor(timeoutRaw)
       : undefined;
+  const allowUnsafeExternalContent = payload.allowUnsafeExternalContent === true;
+  const skipGuardModelChecks = payload.skipGuardModelChecks === true;
   return {
     ok: true,
     value: {
@@ -380,6 +384,8 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
       model,
       thinking,
       timeoutSeconds,
+      allowUnsafeExternalContent,
+      skipGuardModelChecks,
     },
   };
 }

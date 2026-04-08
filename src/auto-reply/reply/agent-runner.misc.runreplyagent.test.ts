@@ -1360,3 +1360,72 @@ describe("runReplyAgent transient HTTP retry", () => {
     expect(payload?.text).toContain("Recovered response");
   });
 });
+
+describe("runReplyAgent heartbeat guard bypass params", () => {
+  it("passes isHeartbeat to the embedded runner", async () => {
+    runEmbeddedPiAgentMock.mockResolvedValue({
+      payloads: [{ text: "HEARTBEAT_OK" }],
+      meta: {},
+    });
+
+    const typing = createMockTypingController();
+    const sessionCtx = {
+      Provider: "heartbeat",
+      OriginatingTo: "session:1",
+      AccountId: "primary",
+      MessageSid: "msg",
+    } as unknown as TemplateContext;
+    const resolvedQueue = { mode: "interrupt" } as unknown as QueueSettings;
+    const followupRun = {
+      prompt: "ops check",
+      summaryLine: "ops check",
+      enqueuedAt: Date.now(),
+      run: {
+        sessionId: "session",
+        sessionKey: "agent:main:main",
+        messageProvider: "heartbeat",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp",
+        config: {},
+        skillsSnapshot: {},
+        provider: "openai-codex",
+        model: "gpt-5.3-codex",
+        thinkLevel: "low",
+        verboseLevel: "off",
+        elevatedLevel: "off",
+        bashElevated: {
+          enabled: false,
+          allowed: false,
+          defaultLevel: "off",
+        },
+        timeoutMs: 1_000,
+        blockReplyBreak: "message_end",
+      },
+    } as unknown as FollowupRun;
+
+    await runReplyAgent({
+      commandBody: "ops check",
+      followupRun,
+      queueKey: "agent:main:main",
+      resolvedQueue,
+      shouldSteer: false,
+      shouldFollowup: false,
+      isActive: false,
+      isStreaming: false,
+      typing,
+      sessionCtx,
+      defaultModel: "openai-codex/gpt-5.3-codex",
+      resolvedVerboseLevel: "off",
+      isNewSession: false,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      shouldInjectGroupIntro: false,
+      typingMode: "instant",
+      opts: { isHeartbeat: true },
+    });
+
+    expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
+    const call = runEmbeddedPiAgentMock.mock.calls[0]?.[0] as { isHeartbeat?: boolean };
+    expect(call.isHeartbeat).toBe(true);
+  });
+});

@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("node:fs", () => ({
+  readFileSync: vi.fn(() => {
+    throw new Error("ENOENT");
+  }),
+}));
+
 vi.mock("../pi-model-discovery.js", () => ({
   discoverAuthStorage: vi.fn(() => ({ mocked: true })),
   discoverModels: vi.fn(() => ({ find: vi.fn(() => null) })),
@@ -51,6 +57,30 @@ describe("pi embedded model e2e smoke", () => {
       id: "gpt-5.3-codex",
       api: "openai-codex-responses",
       baseUrl: "https://chatgpt.com/backend-api",
+      reasoning: true,
+    });
+  });
+
+  it("uses models.json provider baseUrl for codex forward-compat fallback", async () => {
+    const { readFileSync } = await import("node:fs");
+    vi.mocked(readFileSync).mockReturnValueOnce(
+      JSON.stringify({
+        providers: {
+          "openai-codex": {
+            baseUrl: "http://127.0.0.1:18080/v1",
+            models: [],
+          },
+        },
+      }),
+    );
+
+    const result = resolveModel("openai-codex", "gpt-5.3-codex", "/tmp/agent");
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.3-codex",
+      api: "openai-responses",
+      baseUrl: "http://127.0.0.1:18080/v1",
       reasoning: true,
     });
   });

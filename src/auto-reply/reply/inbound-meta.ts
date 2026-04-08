@@ -10,6 +10,39 @@ function safeTrim(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+const INBOUND_CONTEXT_HEADERS = new Set([
+  "Conversation info (untrusted metadata):",
+  "Sender (untrusted metadata):",
+  "Thread starter (untrusted, for context):",
+  "Replied message (untrusted, for context):",
+  "Forwarded message context (untrusted metadata):",
+  "Chat history since last reply (untrusted, for context):",
+]);
+
+export function stripInboundUserContextPrefix(text: string): string {
+  let remaining = text.trimStart();
+
+  while (true) {
+    const firstLineEnd = remaining.indexOf("\n");
+    const header = firstLineEnd === -1 ? remaining.trim() : remaining.slice(0, firstLineEnd).trim();
+    if (!INBOUND_CONTEXT_HEADERS.has(header)) {
+      return remaining;
+    }
+
+    const fenceStart = remaining.indexOf("```json\n", firstLineEnd + 1);
+    if (fenceStart === -1 || fenceStart !== firstLineEnd + 1) {
+      return remaining;
+    }
+
+    const fenceEnd = remaining.indexOf("\n```", fenceStart + "```json\n".length);
+    if (fenceEnd === -1) {
+      return remaining;
+    }
+
+    remaining = remaining.slice(fenceEnd + "\n```".length).trimStart();
+  }
+}
+
 export function buildInboundMetaSystemPrompt(ctx: TemplateContext): string {
   const chatType = normalizeChatType(ctx.ChatType);
   const isDirect = !chatType || chatType === "direct";

@@ -8,7 +8,8 @@ function createTemplateModel(provider: string, id: string): Model<Api> {
     id,
     name: id,
     provider,
-    api: "anthropic-messages",
+    api: provider === "openai-codex" ? "openai-codex-responses" : "anthropic-messages",
+    baseUrl: provider === "openai-codex" ? "https://chatgpt.com/backend-api" : undefined,
     input: ["text"],
     reasoning: true,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -55,5 +56,29 @@ describe("agents/model-forward-compat", () => {
     });
     const model = resolveForwardCompatModel("openai", "claude-opus-4-6", registry);
     expect(model).toBeUndefined();
+  });
+
+  it("uses a configured provider baseUrl for codex fallback when no template exists", () => {
+    const registry = createRegistry({});
+    const model = resolveForwardCompatModel("openai-codex", "gpt-5.3-codex", registry, {
+      providerBaseUrl: "http://127.0.0.1:18080/v1",
+    });
+    expect(model?.id).toBe("gpt-5.3-codex");
+    expect(model?.provider).toBe("openai-codex");
+    expect(model?.api).toBe("openai-responses");
+    expect(model?.baseUrl).toBe("http://127.0.0.1:18080/v1");
+  });
+
+  it("rewrites codex template fallbacks onto openai responses when provider baseUrl points at /v1", () => {
+    const registry = createRegistry({
+      "openai-codex/gpt-5.2-codex": createTemplateModel("openai-codex", "gpt-5.2-codex"),
+    });
+    const model = resolveForwardCompatModel("openai-codex", "gpt-5.3-codex", registry, {
+      providerBaseUrl: "http://127.0.0.1:18080/v1",
+    });
+    expect(model?.id).toBe("gpt-5.3-codex");
+    expect(model?.provider).toBe("openai-codex");
+    expect(model?.api).toBe("openai-responses");
+    expect(model?.baseUrl).toBe("http://127.0.0.1:18080/v1");
   });
 });

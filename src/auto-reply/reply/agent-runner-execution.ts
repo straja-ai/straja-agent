@@ -64,6 +64,37 @@ export type AgentRunLoopResult =
     }
   | { kind: "final"; payload: ReplyPayload };
 
+function classifyGuardPolicyFailure(message: string): {
+  promptInjection: boolean;
+  jailbreak: boolean;
+  toolgateRegex: boolean;
+} {
+  const normalized = message.toLowerCase();
+  const regexOnly = normalized.trim().replace(/\.+$/, "") === "regex";
+  return {
+    promptInjection: normalized.includes("prompt_injection"),
+    jailbreak: normalized.includes("jailbreak"),
+    toolgateRegex: regexOnly,
+  };
+}
+
+function formatGuardPolicyFailureText(message: string): string | null {
+  const match = classifyGuardPolicyFailure(message);
+  if (!match.promptInjection && !match.jailbreak && !match.toolgateRegex) {
+    return null;
+  }
+  if (match.toolgateRegex) {
+    return "⚠️ Straja Guard blocked this request due to a Toolgate regex policy. Check the Straja Guard gateway for details, then revise the tool input and try again.";
+  }
+  if (match.promptInjection && match.jailbreak) {
+    return "⚠️ Straja Guard blocked this request due to prompt injection and jailbreak detection. Check the Straja Guard gateway for details, then rephrase your goal in a legitimate, allowed way.";
+  }
+  if (match.promptInjection) {
+    return "⚠️ Straja Guard blocked this request due to prompt injection detection. Check the Straja Guard gateway for details, then rephrase your goal in a legitimate, allowed way.";
+  }
+  return "⚠️ Straja Guard blocked this request due to jailbreak detection. Check the Straja Guard gateway for details, then rephrase your goal in a legitimate, allowed way.";
+}
+
 export async function runAgentTurnWithFallback(params: {
   commandBody: string;
   followupRun: FollowupRun;
@@ -292,6 +323,7 @@ export async function runAgentTurnWithFallback(params: {
             groupSpace: params.sessionCtx.GroupSpace?.trim() ?? undefined,
             ...senderContext,
             ...runBaseParams,
+            isHeartbeat: params.isHeartbeat,
             prompt: params.commandBody,
             extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
             toolResultFormat: (() => {
@@ -558,15 +590,18 @@ export async function runAgentTurnWithFallback(params: {
       }
 
       defaultRuntime.error(`Embedded agent failed before reply: ${message}`);
+      const guardPolicyFailureText = formatGuardPolicyFailureText(message);
       const safeMessage = isTransientHttp
         ? sanitizeUserFacingText(message, { errorContext: true })
         : message;
       const trimmedMessage = safeMessage.replace(/\.\s*$/, "");
-      const fallbackText = isContextOverflow
-        ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
-        : isRoleOrderingError
-          ? "⚠️ Message ordering conflict - please try again. If this persists, use /new to start a fresh session."
-          : `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`;
+      const fallbackText = guardPolicyFailureText
+        ? guardPolicyFailureText
+        : isContextOverflow
+          ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
+          : isRoleOrderingError
+            ? "⚠️ Message ordering conflict - please try again. If this persists, use /new to start a fresh session."
+            : `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`;
 
       return {
         kind: "final",

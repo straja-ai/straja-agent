@@ -10,10 +10,35 @@ function cronAgentTurnPayloadSchema(params: { message: TSchema }) {
       thinking: Type.Optional(Type.String()),
       timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
       allowUnsafeExternalContent: Type.Optional(Type.Boolean()),
+      skipGuardModelChecks: Type.Optional(Type.Boolean()),
       deliver: Type.Optional(Type.Boolean()),
       channel: Type.Optional(Type.String()),
       to: Type.Optional(Type.String()),
       bestEffortDeliver: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  );
+}
+
+function cronHttpRequestPayloadSchema(params: {
+  url: TSchema;
+  method: TSchema;
+  headers: TSchema;
+  body: TSchema;
+  timeoutSeconds: TSchema;
+  summary: TSchema;
+  allowPrivateNetwork: TSchema;
+}) {
+  return Type.Object(
+    {
+      kind: Type.Literal("httpRequest"),
+      url: params.url,
+      method: params.method,
+      headers: params.headers,
+      body: params.body,
+      timeoutSeconds: params.timeoutSeconds,
+      summary: params.summary,
+      allowPrivateNetwork: params.allowPrivateNetwork,
     },
     { additionalProperties: false },
   );
@@ -83,6 +108,23 @@ export const CronPayloadSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
+  cronHttpRequestPayloadSchema({
+    url: NonEmptyString,
+    method: Type.Optional(
+      Type.Union([
+        Type.Literal("GET"),
+        Type.Literal("POST"),
+        Type.Literal("PUT"),
+        Type.Literal("PATCH"),
+        Type.Literal("DELETE"),
+      ]),
+    ),
+    headers: Type.Optional(Type.Record(NonEmptyString, Type.String())),
+    body: Type.Optional(Type.String()),
+    timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
+    summary: Type.Optional(Type.String()),
+    allowPrivateNetwork: Type.Optional(Type.Boolean()),
+  }),
   cronAgentTurnPayloadSchema({ message: NonEmptyString }),
 ]);
 
@@ -94,6 +136,23 @@ export const CronPayloadPatchSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
+  cronHttpRequestPayloadSchema({
+    url: Type.Optional(NonEmptyString),
+    method: Type.Optional(
+      Type.Union([
+        Type.Literal("GET"),
+        Type.Literal("POST"),
+        Type.Literal("PUT"),
+        Type.Literal("PATCH"),
+        Type.Literal("DELETE"),
+      ]),
+    ),
+    headers: Type.Optional(Type.Record(NonEmptyString, Type.String())),
+    body: Type.Optional(Type.String()),
+    timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
+    summary: Type.Optional(Type.String()),
+    allowPrivateNetwork: Type.Optional(Type.Boolean()),
+  }),
   cronAgentTurnPayloadSchema({ message: Type.Optional(NonEmptyString) }),
 ]);
 

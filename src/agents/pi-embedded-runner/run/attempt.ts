@@ -5,6 +5,7 @@ import type { ImageContent } from "@mariozechner/pi-ai";
 import { streamSimple } from "@mariozechner/pi-ai";
 import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
+import { stripInboundUserContextPrefix } from "../../../auto-reply/reply/inbound-meta.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
@@ -62,6 +63,12 @@ import {
   loadWorkspaceSkillEntries,
   resolveSkillsPromptForRun,
 } from "../../skills.js";
+import {
+  extractTextFromContent,
+  guardModelRequest,
+  guardModelResponse,
+  replaceMessageTextContent,
+} from "../../straja-guard.js";
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveTranscriptPolicy } from "../../transcript-policy.js";
@@ -178,6 +185,18 @@ function summarizeMessagePayload(msg: AgentMessage): { textChars: number; imageB
   }
 
   return { textChars, imageBlocks };
+}
+
+function isInternalVaultHealthProbePrompt(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) {
+    return false;
+  }
+  return (
+    text.includes("Hook Vault Health Probe:") ||
+    (text.includes("Vault Health Probe]") && text.includes("Vault health probe")) ||
+    text.includes("reply HEARTBEAT_OK")
+  );
 }
 
 function summarizeSessionContext(messages: AgentMessage[]): {
@@ -866,12 +885,19 @@ export async function runEmbeddedAttempt(
 
       let promptError: unknown = null;
       let promptErrorSource: "prompt" | "compaction" | null = null;
+      const modelGuardRequestId = `llm:${params.runId}`;
       try {
         const promptStartedAt = Date.now();
 
         // Run before_prompt_build hooks to allow plugins to inject prompt context.
         // Legacy compatibility: before_agent_start is also checked for context fields.
-        let effectivePrompt = params.prompt;
+        const rawUserPrompt = params.prompt;
+        const guardPrompt = stripInboundUserContextPrefix(rawUserPrompt).trim() || rawUserPrompt;
+        const skipGuardModelChecks =
+          params.isHeartbeat === true ||
+          params.skipGuardModelChecks === true ||
+          isInternalVaultHealthProbePrompt(rawUserPrompt);
+        let effectivePrompt = rawUserPrompt;
         const hookCtx = {
           agentId: hookAgentId,
           sessionKey: params.sessionKey,
@@ -917,7 +943,7 @@ export async function runEmbeddedAttempt(
         };
         {
           if (hookResult?.prependContext) {
-            effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
+            effectivePrompt = `${hookResult.prependContext}\n\n${rawUserPrompt}`;
             log.debug(
               `hooks: prepended context to prompt (${hookResult.prependContext.length} chars)`,
             );
@@ -1031,6 +1057,27 @@ export async function runEmbeddedAttempt(
               });
           }
 
+          if (skipGuardModelChecks) {
+            effectivePrompt = hookResult?.prependContext
+              ? `${hookResult.prependContext}\n\n${guardPrompt}`
+              : guardPrompt;
+          } else {
+            const guardRequest = await guardModelRequest({
+              requestId: modelGuardRequestId,
+              provider: params.provider,
+              modelId: params.modelId,
+              prompt: guardPrompt,
+              sessionId: params.sessionId,
+              userId: params.senderId ?? undefined,
+            });
+            if (guardRequest.blocked) {
+              throw new Error(guardRequest.reason || "Blocked by Straja Guard");
+            }
+            effectivePrompt = hookResult?.prependContext
+              ? `${hookResult.prependContext}\n\n${guardRequest.text}`
+              : guardRequest.text;
+          }
+
           // Only pass images option if there are actually images to pass
           // This avoids potential issues with models that don't expect the images parameter
           if (imageResult.images.length > 0) {
@@ -1072,6 +1119,45 @@ export async function runEmbeddedAttempt(
             }
           } else {
             throw err;
+          }
+        }
+
+        if (!promptError) {
+          const liveLastAssistant = activeSession.messages
+            .slice()
+            .toReversed()
+            .find((message) => message.role === "assistant");
+          const liveLastAssistantText = liveLastAssistant
+            ? extractTextFromContent((liveLastAssistant as { content?: unknown }).content)
+            : "";
+          if (!skipGuardModelChecks && liveLastAssistant && liveLastAssistantText.trim()) {
+            const guardResponse = await guardModelResponse({
+              requestId: modelGuardRequestId,
+              provider: params.provider,
+              modelId: params.modelId,
+              outputText: liveLastAssistantText,
+              sessionId: params.sessionId,
+              userId: params.senderId ?? undefined,
+            });
+            if (guardResponse.blocked) {
+              const blockedText = `Response blocked by Straja Guard: ${guardResponse.reason || "policy violation"}`;
+              replaceMessageTextContent(liveLastAssistant as { content?: unknown }, blockedText);
+              if (assistantTexts.length > 0) {
+                assistantTexts.splice(assistantTexts.length - 1, 1, blockedText);
+              } else {
+                assistantTexts.push(blockedText);
+              }
+            } else if (guardResponse.checked && guardResponse.text !== liveLastAssistantText) {
+              replaceMessageTextContent(
+                liveLastAssistant as { content?: unknown },
+                guardResponse.text,
+              );
+              if (assistantTexts.length > 0) {
+                assistantTexts.splice(assistantTexts.length - 1, 1, guardResponse.text);
+              } else {
+                assistantTexts.push(guardResponse.text);
+              }
+            }
           }
         }
 

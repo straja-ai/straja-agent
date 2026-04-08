@@ -125,13 +125,9 @@ export function renderApp(state: AppViewState) {
             <span class="nav-collapse-toggle__icon">${icons.menu}</span>
           </button>
           <div class="brand">
-            <div class="brand-logo">
-              <img src=${basePath ? `${basePath}/favicon.svg` : "/favicon.svg"} alt="Straja Agent" />
-            </div>
-            <div class="brand-text">
-              <div class="brand-title">Straja Agent</div>
-              <div class="brand-sub">Gateway Dashboard</div>
-            </div>
+            <img class="brand-mark" src=${basePath ? `${basePath}/favicon.svg` : "/favicon.svg"} alt="Straja Agent" />
+            <span class="brand-logo-text">straja</span>
+            <span class="brand-product-label">agent</span>
           </div>
         </div>
         <div class="topbar-status">

@@ -27,6 +27,42 @@ const ANTIGRAVITY_OPUS_THINKING_TEMPLATE_MODEL_IDS = [
   "claude-opus-4.5-thinking",
 ] as const;
 
+type ForwardCompatOptions = {
+  providerBaseUrl?: string;
+};
+
+function resolveOpenAICodexTransport(baseUrl?: string): {
+  api: "openai-codex-responses" | "openai-responses";
+  baseUrl: string;
+} {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) {
+    return {
+      api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+    };
+  }
+
+  const normalized = trimmed.replace(/\/+$/, "");
+  if (normalized.endsWith("/v1/responses")) {
+    return {
+      api: "openai-responses",
+      baseUrl: normalized.slice(0, -"/responses".length),
+    };
+  }
+  if (normalized.endsWith("/v1")) {
+    return {
+      api: "openai-responses",
+      baseUrl: normalized,
+    };
+  }
+
+  return {
+    api: "openai-codex-responses",
+    baseUrl: normalized,
+  };
+}
+
 export const ANTIGRAVITY_OPUS_46_FORWARD_COMPAT_CANDIDATES = [
   {
     id: ANTIGRAVITY_OPUS_46_THINKING_MODEL_ID,
@@ -68,6 +104,7 @@ function resolveOpenAICodexForwardCompatModel(
   provider: string,
   modelId: string,
   modelRegistry: ModelRegistry,
+  options?: ForwardCompatOptions,
 ): Model<Api> | undefined {
   const normalizedProvider = normalizeProviderId(provider);
   const trimmedModelId = modelId.trim();
@@ -78,6 +115,8 @@ function resolveOpenAICodexForwardCompatModel(
     return undefined;
   }
 
+  const transport = resolveOpenAICodexTransport(options?.providerBaseUrl);
+
   for (const templateId of OPENAI_CODEX_TEMPLATE_MODEL_IDS) {
     const template = modelRegistry.find(normalizedProvider, templateId) as Model<Api> | null;
     if (!template) {
@@ -87,15 +126,17 @@ function resolveOpenAICodexForwardCompatModel(
       ...template,
       id: trimmedModelId,
       name: trimmedModelId,
+      api: options?.providerBaseUrl?.trim() ? transport.api : template.api,
+      baseUrl: options?.providerBaseUrl?.trim() ? transport.baseUrl : template.baseUrl,
     } as Model<Api>);
   }
 
   return normalizeModelCompat({
     id: trimmedModelId,
     name: trimmedModelId,
-    api: "openai-codex-responses",
+    api: transport.api,
     provider: normalizedProvider,
-    baseUrl: "https://chatgpt.com/backend-api",
+    baseUrl: transport.baseUrl,
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -282,9 +323,10 @@ export function resolveForwardCompatModel(
   provider: string,
   modelId: string,
   modelRegistry: ModelRegistry,
+  options?: ForwardCompatOptions,
 ): Model<Api> | undefined {
   return (
-    resolveOpenAICodexForwardCompatModel(provider, modelId, modelRegistry) ??
+    resolveOpenAICodexForwardCompatModel(provider, modelId, modelRegistry, options) ??
     resolveAnthropicOpus46ForwardCompatModel(provider, modelId, modelRegistry) ??
     resolveAnthropicSonnet46ForwardCompatModel(provider, modelId, modelRegistry) ??
     resolveZaiGlm5ForwardCompatModel(provider, modelId, modelRegistry) ??

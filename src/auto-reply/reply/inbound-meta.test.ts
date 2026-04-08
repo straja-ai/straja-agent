@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { TemplateContext } from "../templating.js";
-import { buildInboundMetaSystemPrompt, buildInboundUserContextPrefix } from "./inbound-meta.js";
+import {
+  buildInboundMetaSystemPrompt,
+  buildInboundUserContextPrefix,
+  stripInboundUserContextPrefix,
+} from "./inbound-meta.js";
 
 function parseInboundMetaPayload(text: string): Record<string, unknown> {
   const match = text.match(/```json\n([\s\S]*?)\n```/);
@@ -178,5 +182,19 @@ describe("buildInboundUserContextPrefix", () => {
 
     const conversationInfo = parseConversationInfoPayload(text);
     expect(conversationInfo["sender"]).toBe("user@example.com");
+  });
+
+  it("strips prefixed inbound metadata blocks and keeps the user message", () => {
+    const prefix = buildInboundUserContextPrefix({
+      ChatType: "group",
+      MessageSid: "msg-456",
+      SenderId: "289522496",
+      SenderName: "Stelo",
+      ReplyToBody: "Earlier quoted text",
+    } as TemplateContext);
+
+    const stripped = stripInboundUserContextPrefix(`${prefix}\n\nhi there`);
+
+    expect(stripped).toBe("hi there");
   });
 });

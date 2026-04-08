@@ -1304,6 +1304,74 @@ describe("runReplyAgent typing (heartbeat)", () => {
     });
   });
 
+  it("returns a friendly refusal for guard prompt injection and jailbreak blocks", async () => {
+    await withTempStateDir(async (stateDir) => {
+      const sessionId = "session-guard-block";
+      const storePath = path.join(stateDir, "sessions", "sessions.json");
+      const sessionEntry = { sessionId, updatedAt: Date.now() };
+      const sessionStore = { main: sessionEntry };
+
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
+
+      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      await fs.writeFile(transcriptPath, "ok", "utf-8");
+
+      state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => {
+        throw new Error("ml:straja/prompt_injection, jailbreak");
+      });
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        storePath,
+      });
+      const res = await run();
+
+      expect(res).toMatchObject({
+        text: "⚠️ Straja Guard blocked this request due to prompt injection and jailbreak detection. Check the Straja Guard gateway for details, then rephrase your goal in a legitimate, allowed way.",
+      });
+      expect(sessionStore.main).toBeDefined();
+      await expect(fs.access(transcriptPath)).resolves.toBeUndefined();
+    });
+  });
+
+  it("returns a friendly refusal for toolgate regex blocks", async () => {
+    await withTempStateDir(async (stateDir) => {
+      const sessionId = "session-toolgate-regex";
+      const storePath = path.join(stateDir, "sessions", "sessions.json");
+      const sessionEntry = { sessionId, updatedAt: Date.now() };
+      const sessionStore = { main: sessionEntry };
+
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
+
+      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      await fs.writeFile(transcriptPath, "ok", "utf-8");
+
+      state.runEmbeddedPiAgentMock.mockImplementationOnce(async () => {
+        throw new Error("regex.");
+      });
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        storePath,
+      });
+      const res = await run();
+
+      expect(res).toMatchObject({
+        text: "⚠️ Straja Guard blocked this request due to a Toolgate regex policy. Check the Straja Guard gateway for details, then revise the tool input and try again.",
+      });
+      expect(sessionStore.main).toBeDefined();
+      await expect(fs.access(transcriptPath)).resolves.toBeUndefined();
+    });
+  });
+
   it("still replies even if session reset fails to persist", async () => {
     await withTempStateDir(async (stateDir) => {
       const saveSpy = vi

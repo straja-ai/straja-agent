@@ -102,6 +102,7 @@ describe("gateway hooks helpers", () => {
       expect(ok.value.channel).toBe("last");
       expect(ok.value.name).toBe("Hook");
       expect(ok.value.deliver).toBe(true);
+      expect(ok.value.allowUnsafeExternalContent).toBe(false);
     }
 
     const explicitNoDeliver = normalizeAgentPayload({ message: "hello", deliver: false });
@@ -142,6 +143,28 @@ describe("gateway hooks helpers", () => {
 
     const bad = normalizeAgentPayload({ message: "yo", channel: "sms" });
     expect(bad.ok).toBe(false);
+  });
+
+  test("normalizeAgentPayload preserves allowUnsafeExternalContent", () => {
+    const ok = normalizeAgentPayload({
+      message: "hello",
+      allowUnsafeExternalContent: true,
+    });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.value.allowUnsafeExternalContent).toBe(true);
+    }
+  });
+
+  test("normalizeAgentPayload preserves skipGuardModelChecks", () => {
+    const ok = normalizeAgentPayload({
+      message: "hello",
+      skipGuardModelChecks: true,
+    });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.value.skipGuardModelChecks).toBe(true);
+    }
   });
 
   test("normalizeAgentPayload passes agentId", () => {

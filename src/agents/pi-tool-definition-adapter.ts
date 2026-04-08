@@ -11,9 +11,11 @@ import type { ClientToolDefinition } from "./pi-embedded-runner/run/params.js";
 import type { HookContext } from "./pi-tools.before-tool-call.js";
 import {
   consumeAdjustedParamsForToolCall,
+  consumeHookContextForToolCall,
   isToolWrappedWithBeforeToolCallHook,
   runBeforeToolCallHook,
 } from "./pi-tools.before-tool-call.js";
+import { guardToolResult } from "./straja-guard.js";
 import { normalizeToolName } from "./tool-policy.js";
 import { jsonResult } from "./tools/common.js";
 
@@ -112,6 +114,20 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
             executeParams = hookOutcome.params;
           }
           const result = await tool.execute(toolCallId, executeParams, signal, onUpdate);
+          const hookCtx = beforeHookWrapped ? consumeHookContextForToolCall(toolCallId) : undefined;
+          const guardedResult = await guardToolResult({
+            requestId: toolCallId || `${normalizedName}:${Date.now()}`,
+            toolName: normalizedName,
+            result,
+            sessionId: hookCtx?.sessionKey,
+          });
+          const finalResult = guardedResult.blocked
+            ? jsonResult({
+                status: "error",
+                tool: normalizedName,
+                error: guardedResult.reason || "Tool result blocked by Straja Guard",
+              })
+            : guardedResult.result;
           const afterParams = beforeHookWrapped
             ? (consumeAdjustedParamsForToolCall(toolCallId) ?? executeParams)
             : executeParams;
@@ -124,7 +140,7 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
                 {
                   toolName: name,
                   params: isPlainObject(afterParams) ? afterParams : {},
-                  result,
+                  result: finalResult,
                 },
                 { toolName: name },
               );
@@ -135,7 +151,7 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
             }
           }
 
-          return result;
+          return finalResult;
         } catch (err) {
           if (signal?.aborted) {
             throw err;
@@ -149,6 +165,7 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
           }
           if (beforeHookWrapped) {
             consumeAdjustedParamsForToolCall(toolCallId);
+            consumeHookContextForToolCall(toolCallId);
           }
           const described = describeToolExecutionError(err);
           if (described.stack && described.stack !== described.message) {

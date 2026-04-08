@@ -86,6 +86,10 @@ function normalizePayloadKind(payload: Record<string, unknown>) {
     payload.kind = "systemEvent";
     return true;
   }
+  if (raw === "httprequest") {
+    payload.kind = "httpRequest";
+    return true;
+  }
   return false;
 }
 
@@ -139,6 +143,13 @@ function copyTopLevelAgentTurnFields(
     payload.allowUnsafeExternalContent = raw.allowUnsafeExternalContent;
     mutated = true;
   }
+  if (
+    typeof payload.skipGuardModelChecks !== "boolean" &&
+    typeof raw.skipGuardModelChecks === "boolean"
+  ) {
+    payload.skipGuardModelChecks = raw.skipGuardModelChecks;
+    mutated = true;
+  }
 
   if (typeof payload.deliver !== "boolean" && typeof raw.deliver === "boolean") {
     payload.deliver = raw.deliver;
@@ -188,6 +199,9 @@ function stripLegacyTopLevelFields(raw: Record<string, unknown>) {
   if ("allowUnsafeExternalContent" in raw) {
     delete raw.allowUnsafeExternalContent;
   }
+  if ("skipGuardModelChecks" in raw) {
+    delete raw.skipGuardModelChecks;
+  }
   if ("message" in raw) {
     delete raw.message;
   }
@@ -220,6 +234,27 @@ async function getFileMtimeMs(path: string): Promise<number | null> {
   }
 }
 
+function formatStoreError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  if (typeof err === "string") {
+    return err;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "";
+  }
+}
+
+function isRetryableCronStoreError(err: unknown): boolean {
+  const message = formatStoreError(err);
+  return /423\s+Locked|Vault cron store (load|save) failed|ECONNREFUSED|fetch failed|socket hang up|EPIPE|ETIMEDOUT|ECONNRESET|network error|aborted/i.test(
+    message,
+  );
+}
+
 export async function ensureLoaded(
   state: CronServiceState,
   opts?: {
@@ -234,11 +269,38 @@ export async function ensureLoaded(
   if (state.store && !opts?.forceReload) {
     return;
   }
+  if (state.store && state.storeDirty) {
+    try {
+      await persist(state);
+      return;
+    } catch (err) {
+      if (isRetryableCronStoreError(err)) {
+        state.deps.log.warn(
+          { err: formatStoreError(err), storePath: state.deps.storePath },
+          "cron: store still unavailable; continuing with dirty in-memory cache",
+        );
+        return;
+      }
+      throw err;
+    }
+  }
   // Force reload always re-reads the file to avoid missing cross-service
   // edits on filesystems with coarse mtime resolution.
 
   const fileMtimeMs = await getFileMtimeMs(state.deps.storePath);
-  const loaded = await loadCronStore(state.deps.storePath);
+  let loaded;
+  try {
+    loaded = await loadCronStore(state.deps.storePath);
+  } catch (err) {
+    if (state.store && isRetryableCronStoreError(err)) {
+      state.deps.log.warn(
+        { err: formatStoreError(err), storePath: state.deps.storePath },
+        "cron: store load unavailable; continuing with in-memory cache",
+      );
+      return;
+    }
+    throw err;
+  }
   const jobs = (loaded.jobs ?? []) as unknown as Array<Record<string, unknown>>;
   let mutated = false;
   for (const raw of jobs) {
@@ -460,6 +522,7 @@ export async function ensureLoaded(
     }
   }
   state.store = { version: 1, jobs: jobs as unknown as CronJob[] };
+  state.storeDirty = false;
   state.storeLoadedAtMs = state.deps.nowMs();
   state.storeFileMtimeMs = fileMtimeMs;
 
@@ -490,7 +553,21 @@ export async function persist(state: CronServiceState) {
   if (!state.store) {
     return;
   }
-  await saveCronStore(state.deps.storePath, state.store);
+  try {
+    await saveCronStore(state.deps.storePath, state.store);
+  } catch (err) {
+    if (isRetryableCronStoreError(err)) {
+      state.storeDirty = true;
+      state.deps.log.warn(
+        { err: formatStoreError(err), storePath: state.deps.storePath },
+        "cron: store save unavailable; keeping dirty in-memory cache",
+      );
+      return;
+    }
+    throw err;
+  }
+  state.storeDirty = false;
   // Update file mtime after save to prevent immediate reload
   state.storeFileMtimeMs = await getFileMtimeMs(state.deps.storePath);
+  state.storeLoadedAtMs = state.deps.nowMs();
 }

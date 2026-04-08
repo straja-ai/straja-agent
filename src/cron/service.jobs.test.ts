@@ -159,6 +159,52 @@ describe("applyJobPatch", () => {
     ).not.toThrow();
     expect(job.delivery).toEqual({ mode: "webhook", to: "https://example.invalid/trim" });
   });
+
+  it("merges httpRequest payload patches without dropping existing fields", () => {
+    const now = Date.now();
+    const job: CronJob = {
+      id: "job-http-request",
+      name: "job-http-request",
+      enabled: true,
+      createdAtMs: now,
+      updatedAtMs: now,
+      schedule: { kind: "every", everyMs: 60_000 },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: {
+        kind: "httpRequest",
+        url: "https://vault.example.invalid/tasks/tsk_123/run",
+        method: "POST",
+        headers: {
+          Authorization: "Bearer before",
+        },
+        summary: "Before",
+      },
+      state: {},
+    };
+
+    applyJobPatch(job, {
+      payload: {
+        kind: "httpRequest",
+        headers: {
+          Authorization: "Bearer after",
+          "Content-Type": "application/json",
+        },
+        summary: "After",
+      },
+    });
+
+    expect(job.payload).toEqual({
+      kind: "httpRequest",
+      url: "https://vault.example.invalid/tasks/tsk_123/run",
+      method: "POST",
+      headers: {
+        Authorization: "Bearer after",
+        "Content-Type": "application/json",
+      },
+      summary: "After",
+    });
+  });
 });
 
 function createMockState(now: number): CronServiceState {

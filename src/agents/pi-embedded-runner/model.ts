@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { ModelDefinitionConfig } from "../../config/types.js";
@@ -22,6 +24,19 @@ type InlineProviderConfig = {
 };
 
 export { buildModelAliasLines };
+
+function readProviderBaseUrlFromModelsJson(agentDir: string, provider: string): string | undefined {
+  try {
+    const raw = readFileSync(path.join(agentDir, "models.json"), "utf8");
+    const parsed = JSON.parse(raw) as {
+      providers?: Record<string, { baseUrl?: unknown } | undefined>;
+    };
+    const providerEntry = parsed.providers?.[provider];
+    return typeof providerEntry?.baseUrl === "string" ? providerEntry.baseUrl.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function buildInlineProviderModels(
   providers: Record<string, InlineProviderConfig>,
@@ -59,6 +74,9 @@ export function resolveModel(
     const providers = cfg?.models?.providers ?? {};
     const inlineModels = buildInlineProviderModels(providers);
     const normalizedProvider = normalizeProviderId(provider);
+    const providerCfg = providers[provider];
+    const providerBaseUrl =
+      providerCfg?.baseUrl?.trim() || readProviderBaseUrlFromModelsJson(resolvedAgentDir, provider);
     const inlineMatch = inlineModels.find(
       (entry) => normalizeProviderId(entry.provider) === normalizedProvider && entry.id === modelId,
     );
@@ -72,11 +90,12 @@ export function resolveModel(
     }
     // Forward-compat fallbacks must be checked BEFORE the generic providerCfg fallback.
     // Otherwise, configured providers can default to a generic API and break specific transports.
-    const forwardCompat = resolveForwardCompatModel(provider, modelId, modelRegistry);
+    const forwardCompat = resolveForwardCompatModel(provider, modelId, modelRegistry, {
+      providerBaseUrl,
+    });
     if (forwardCompat) {
       return { model: forwardCompat, authStorage, modelRegistry };
     }
-    const providerCfg = providers[provider];
     if (providerCfg || modelId.startsWith("mock-")) {
       const fallbackModel: Model<Api> = normalizeModelCompat({
         id: modelId,

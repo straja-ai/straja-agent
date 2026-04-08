@@ -3,7 +3,12 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Derive the agent project root from this script's location (scripts/run-node.mjs → ../).
+// This is intentionally NOT process.cwd() — the script may be invoked from any directory
+// (e.g. ~/.openclaw/, appDataDir/agent/, $HOME) and must always find its own dist/src/package.json.
+const __agentRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const compiler = "tsdown";
 const compilerArgs = ["exec", compiler, "--no-clean"];
@@ -214,7 +219,7 @@ export async function runNodeMain(params = {}) {
     fs: params.fs ?? fs,
     stderr: params.stderr ?? process.stderr,
     execPath: params.execPath ?? process.execPath,
-    cwd: params.cwd ?? process.cwd(),
+    cwd: params.cwd ?? __agentRoot,
     args: params.args ?? process.argv.slice(2),
     env: params.env ? { ...params.env } : { ...process.env },
     platform: params.platform ?? process.platform,

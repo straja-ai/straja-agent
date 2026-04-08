@@ -49,10 +49,21 @@ export type CronRunOutcome = {
   summary?: string;
   sessionId?: string;
   sessionKey?: string;
+  retryable?: boolean;
 };
 
 export type CronPayload =
   | { kind: "systemEvent"; text: string }
+  | {
+      kind: "httpRequest";
+      url: string;
+      method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      headers?: Record<string, string>;
+      body?: string;
+      timeoutSeconds?: number;
+      summary?: string;
+      allowPrivateNetwork?: boolean;
+    }
   | {
       kind: "agentTurn";
       message: string;
@@ -61,6 +72,7 @@ export type CronPayload =
       thinking?: string;
       timeoutSeconds?: number;
       allowUnsafeExternalContent?: boolean;
+      skipGuardModelChecks?: boolean;
       deliver?: boolean;
       channel?: CronMessageChannel;
       to?: string;
@@ -70,12 +82,23 @@ export type CronPayload =
 export type CronPayloadPatch =
   | { kind: "systemEvent"; text?: string }
   | {
+      kind: "httpRequest";
+      url?: string;
+      method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      headers?: Record<string, string>;
+      body?: string;
+      timeoutSeconds?: number;
+      summary?: string;
+      allowPrivateNetwork?: boolean;
+    }
+  | {
       kind: "agentTurn";
       message?: string;
       model?: string;
       thinking?: string;
       timeoutSeconds?: number;
       allowUnsafeExternalContent?: boolean;
+      skipGuardModelChecks?: boolean;
       deliver?: boolean;
       channel?: CronMessageChannel;
       to?: string;

@@ -30,6 +30,7 @@ const MIN_REFIRE_GAP_MS = 2_000;
  * from wedging the entire cron lane.
  */
 const DEFAULT_JOB_TIMEOUT_MS = 10 * 60_000; // 10 minutes
+const RETRYABLE_ERROR_RETRY_MS = 10_000;
 
 type TimedCronRunOutcome = CronRunOutcome &
   CronRunTelemetry & {
@@ -66,6 +67,7 @@ function applyJobResult(
   result: {
     status: CronRunStatus;
     error?: string;
+    retryable?: boolean;
     startedAt: number;
     endedAt: number;
   },
@@ -76,9 +78,10 @@ function applyJobResult(
   job.state.lastDurationMs = Math.max(0, result.endedAt - result.startedAt);
   job.state.lastError = result.error;
   job.updatedAtMs = result.endedAt;
+  const isRetryableError = result.status === "error" && result.retryable === true;
 
   // Track consecutive errors for backoff / auto-disable.
-  if (result.status === "error") {
+  if (result.status === "error" && !isRetryableError) {
     job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
   } else {
     job.state.consecutiveErrors = 0;
@@ -88,7 +91,28 @@ function applyJobResult(
     job.schedule.kind === "at" && job.deleteAfterRun === true && result.status === "ok";
 
   if (!shouldDelete) {
-    if (job.schedule.kind === "at") {
+    if (isRetryableError) {
+      const retryAt = result.endedAt + RETRYABLE_ERROR_RETRY_MS;
+      if (job.schedule.kind === "at") {
+        job.enabled = true;
+        job.state.nextRunAtMs = retryAt;
+      } else if (job.enabled) {
+        const naturalNext = computeJobNextRunAtMs(job, result.endedAt);
+        job.state.nextRunAtMs =
+          naturalNext !== undefined ? Math.min(naturalNext, retryAt) : retryAt;
+      } else {
+        job.state.nextRunAtMs = undefined;
+      }
+      state.deps.log.info(
+        {
+          jobId: job.id,
+          jobName: job.name,
+          retryAtMs: job.state.nextRunAtMs,
+          error: result.error,
+        },
+        "cron: scheduling retryable error retry",
+      );
+    } else if (job.schedule.kind === "at") {
       // One-shot jobs are always disabled after ANY terminal status
       // (ok, error, or skipped). This prevents tight-loop rescheduling
       // when computeJobNextRunAtMs returns the past atMs value (#11452).
@@ -305,6 +329,7 @@ export async function onTimer(state: CronServiceState) {
           const shouldDelete = applyJobResult(state, job, {
             status: result.status,
             error: result.error,
+            retryable: result.retryable,
             startedAt: result.startedAt,
             endedAt: result.endedAt,
           });
@@ -522,7 +547,13 @@ async function executeJobCore(
   }
 
   if (job.payload.kind !== "agentTurn") {
-    return { status: "skipped", error: "isolated job requires payload.kind=agentTurn" };
+    if (job.payload.kind === "httpRequest") {
+      if (!state.deps.runHttpRequestJob) {
+        return { status: "error", error: "cron httpRequest runner is unavailable" };
+      }
+      return await state.deps.runHttpRequestJob({ job, payload: job.payload });
+    }
+    return { status: "skipped", error: "isolated job requires payload.kind=agentTurn|httpRequest" };
   }
 
   const res = await state.deps.runIsolatedAgentJob({
@@ -600,6 +631,7 @@ export async function executeJob(
   const shouldDelete = applyJobResult(state, job, {
     status: coreResult.status,
     error: coreResult.error,
+    retryable: coreResult.retryable,
     startedAt,
     endedAt,
   });

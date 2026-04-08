@@ -30,7 +30,7 @@ function syncHttpGet(url: string): { status: number; body: string } {
   }
 }
 
-function syncHttpPut(url: string, body: string): void {
+function syncHttpPut(url: string, body: string): { status: number; locked: boolean } {
   try {
     const statusRaw = execFileSync(
       "curl",
@@ -56,11 +56,12 @@ function syncHttpPut(url: string, body: string): void {
     );
     const status = Number.parseInt(statusRaw.trim().split("\n").pop() || "0", 10);
     if (status === 423) {
-      throw new Error(`Vault is locked — unlock it before starting the agent`);
+      return { status, locked: true };
     }
     if (!Number.isFinite(status) || status < 200 || status >= 300) {
       throw new Error(`HTTP ${status}`);
     }
+    return { status, locked: false };
   } catch (err: unknown) {
     const msg = formatVaultCurlError(err);
     if (msg.includes("locked")) throw err;
@@ -77,7 +78,9 @@ function createVaultSubagentRegistryOps(baseUrl: string): SubagentRegistryPatchO
       return {};
     }
     if (resp.status === 423) {
-      throw new Error(`Vault is locked — unlock it before starting the agent`);
+      // The gateway should still be able to boot while Vault is locked.
+      // Treat the registry as temporarily unavailable and fall back to an empty in-memory view.
+      return {};
     }
     if (resp.status !== 200) {
       throw new Error(`Vault subagent-registry read failed (${resp.status})`);
@@ -94,7 +97,13 @@ function createVaultSubagentRegistryOps(baseUrl: string): SubagentRegistryPatchO
 
   const saveSubagentRegistry = (runs: Record<string, unknown>) => {
     const body = JSON.stringify(runs, null, 2);
-    syncHttpPut(url, body);
+    const result = syncHttpPut(url, body);
+    if (result.locked) {
+      // The gateway should still be able to boot and run while Vault is locked.
+      // Treat persistence as temporarily unavailable and keep the current
+      // in-memory subagent registry state until Vault is unlocked.
+      return;
+    }
   };
 
   return { loadSubagentRegistry, saveSubagentRegistry };

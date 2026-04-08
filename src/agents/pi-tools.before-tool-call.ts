@@ -3,6 +3,7 @@ import type { SessionState } from "../logging/diagnostic-session-state.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { isPlainObject } from "../utils.js";
+import { guardToolParams } from "./straja-guard.js";
 import { normalizeToolName } from "./tool-policy.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
@@ -17,6 +18,7 @@ type HookOutcome = { blocked: true; reason: string } | { blocked: false; params:
 const log = createSubsystemLogger("agents/tools");
 const BEFORE_TOOL_CALL_WRAPPED = Symbol("beforeToolCallWrapped");
 const adjustedParamsByToolCallId = new Map<string, unknown>();
+const hookContextByToolCallId = new Map<string, HookContext | undefined>();
 const MAX_TRACKED_ADJUSTED_PARAMS = 1024;
 const LOOP_WARNING_BUCKET_SIZE = 10;
 const MAX_LOOP_WARNING_KEYS = 256;
@@ -169,7 +171,20 @@ export async function runBeforeToolCallHook(args: {
     log.warn(`before_tool_call hook failed: tool=${toolName}${toolCallId} error=${String(err)}`);
   }
 
-  return { blocked: false, params };
+  const guardOutcome = await guardToolParams({
+    requestId: args.toolCallId || `${toolName}:${Date.now()}`,
+    toolName,
+    toolParams: params,
+    sessionId: args.ctx?.sessionKey,
+  });
+  if (guardOutcome.blocked) {
+    return {
+      blocked: true,
+      reason: guardOutcome.reason || "Tool call blocked by Straja Guard",
+    };
+  }
+
+  return { blocked: false, params: guardOutcome.params };
 }
 
 export function wrapToolWithBeforeToolCallHook(
@@ -195,10 +210,12 @@ export function wrapToolWithBeforeToolCallHook(
       }
       if (toolCallId) {
         adjustedParamsByToolCallId.set(toolCallId, outcome.params);
+        hookContextByToolCallId.set(toolCallId, ctx);
         if (adjustedParamsByToolCallId.size > MAX_TRACKED_ADJUSTED_PARAMS) {
           const oldest = adjustedParamsByToolCallId.keys().next().value;
           if (oldest) {
             adjustedParamsByToolCallId.delete(oldest);
+            hookContextByToolCallId.delete(oldest);
           }
         }
       }
@@ -243,9 +260,16 @@ export function consumeAdjustedParamsForToolCall(toolCallId: string): unknown {
   return params;
 }
 
+export function consumeHookContextForToolCall(toolCallId: string): HookContext | undefined {
+  const ctx = hookContextByToolCallId.get(toolCallId);
+  hookContextByToolCallId.delete(toolCallId);
+  return ctx;
+}
+
 export const __testing = {
   BEFORE_TOOL_CALL_WRAPPED,
   adjustedParamsByToolCallId,
+  hookContextByToolCallId,
   runBeforeToolCallHook,
   isPlainObject,
 };

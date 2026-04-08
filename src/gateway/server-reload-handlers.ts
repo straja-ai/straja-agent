@@ -68,15 +68,13 @@ export function createGatewayReloadHandlers(params: {
     resetDirectoryCache();
 
     if (plan.restartCron) {
-      state.cronState.cron.stop();
+      state.cronState.stop();
       nextState.cronState = buildGatewayCronService({
         cfg: nextConfig,
         deps: params.deps,
         broadcast: params.broadcast,
       });
-      void nextState.cronState.cron
-        .start()
-        .catch((err) => params.logCron.error(`failed to start: ${String(err)}`));
+      nextState.cronState.start();
     }
 
     if (plan.restartBrowserControl) {

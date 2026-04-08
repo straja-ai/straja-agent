@@ -7,6 +7,7 @@ import * as schedule from "./schedule.js";
 import { CronService } from "./service.js";
 import { createRunningCronServiceState } from "./service.test-harness.js";
 import { computeJobNextRunAtMs } from "./service/jobs.js";
+import * as serviceOps from "./service/ops.js";
 import { createCronServiceState, type CronEvent } from "./service/state.js";
 import { onTimer } from "./service/timer.js";
 import type { CronJob, CronJobState } from "./types.js";
@@ -18,6 +19,7 @@ const noopLogger = {
   debug: vi.fn(),
   trace: vi.fn(),
 };
+const CRON_STORE_PATCH_KEY = Symbol.for("openclaw.cronStorePatchCallback");
 const TOP_OF_HOUR_STAGGER_MS = 5 * 60 * 1_000;
 type CronServiceOptions = ConstructorParameters<typeof CronService>[0];
 
@@ -110,6 +112,7 @@ async function startCronForStore(params: {
   enqueueSystemEvent?: CronServiceOptions["enqueueSystemEvent"];
   requestHeartbeatNow?: CronServiceOptions["requestHeartbeatNow"];
   runIsolatedAgentJob?: CronServiceOptions["runIsolatedAgentJob"];
+  runHttpRequestJob?: CronServiceOptions["runHttpRequestJob"];
   onEvent?: CronServiceOptions["onEvent"];
 }) {
   const enqueueSystemEvent =
@@ -117,6 +120,8 @@ async function startCronForStore(params: {
   const requestHeartbeatNow =
     params.requestHeartbeatNow ?? (vi.fn() as unknown as CronServiceOptions["requestHeartbeatNow"]);
   const runIsolatedAgentJob = params.runIsolatedAgentJob ?? createDefaultIsolatedRunner();
+  const runHttpRequestJob =
+    params.runHttpRequestJob ?? (vi.fn() as unknown as CronServiceOptions["runHttpRequestJob"]);
 
   const cron = new CronService({
     cronEnabled: params.cronEnabled ?? true,
@@ -125,6 +130,7 @@ async function startCronForStore(params: {
     enqueueSystemEvent,
     requestHeartbeatNow,
     runIsolatedAgentJob,
+    runHttpRequestJob,
     ...(params.onEvent ? { onEvent: params.onEvent } : {}),
   });
   await cron.start();
@@ -224,7 +230,113 @@ describe("Cron issue regressions", () => {
       expect(patched.payload.message).toBe("hi");
     }
 
+    const skipGuardToggle = await cron.add({
+      name: "skip guard toggle",
+      enabled: true,
+      schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() },
+      sessionTarget: "isolated",
+      wakeMode: "next-heartbeat",
+      payload: { kind: "agentTurn", message: "hi" },
+    });
+
+    const skipGuardPatched = await cron.update(skipGuardToggle.id, {
+      payload: { kind: "agentTurn", skipGuardModelChecks: true },
+    });
+
+    expect(skipGuardPatched.payload.kind).toBe("agentTurn");
+    if (skipGuardPatched.payload.kind === "agentTurn") {
+      expect(skipGuardPatched.payload.skipGuardModelChecks).toBe(true);
+      expect(skipGuardPatched.payload.message).toBe("hi");
+    }
+
     cron.stop();
+  });
+
+  it("retries recurring httpRequest jobs quickly after transient internal callback failures", async () => {
+    const store = await makeStorePath();
+    const runHttpRequestJob = vi.fn().mockResolvedValue({
+      status: "error",
+      error: "Vault cron store load failed: 423 Locked",
+      summary: "Scheduled task",
+      retryable: true,
+    });
+
+    const cron = await startCronForStore({
+      storePath: store.storePath,
+      runHttpRequestJob,
+    });
+
+    try {
+      const created = await cron.add({
+        name: "retry-recurring-http",
+        enabled: true,
+        schedule: { kind: "every", everyMs: 120_000, anchorMs: Date.now() - 120_000 },
+        sessionTarget: "isolated",
+        wakeMode: "next-heartbeat",
+        payload: {
+          kind: "httpRequest",
+          url: "http://127.0.0.1:8181/tasks/tsk_retry/run",
+          method: "POST",
+          allowPrivateNetwork: true,
+        },
+        delivery: { mode: "none" },
+      });
+
+      const result = await cron.run(created.id, "force");
+      expect(result).toEqual({ ok: true, ran: true });
+
+      const updated = cron.getJob(created.id);
+      expect(updated?.enabled).toBe(true);
+      expect(updated?.state.lastStatus).toBe("error");
+      expect(updated?.state.consecutiveErrors).toBe(0);
+      expect(updated?.state.nextRunAtMs).toBeGreaterThanOrEqual(Date.now());
+      expect(updated?.state.nextRunAtMs).toBeLessThanOrEqual(Date.now() + 10_000);
+    } finally {
+      cron.stop();
+    }
+  });
+
+  it("keeps one-off httpRequest jobs armed after transient internal callback failures", async () => {
+    const store = await makeStorePath();
+    const runHttpRequestJob = vi.fn().mockResolvedValue({
+      status: "error",
+      error: "connect ECONNREFUSED 127.0.0.1:8181",
+      summary: "Scheduled one-off task",
+      retryable: true,
+    });
+
+    const cron = await startCronForStore({
+      storePath: store.storePath,
+      runHttpRequestJob,
+    });
+
+    try {
+      const created = await cron.add({
+        name: "retry-one-off-http",
+        enabled: true,
+        schedule: { kind: "at", at: new Date(Date.now() - 1_000).toISOString() },
+        sessionTarget: "isolated",
+        wakeMode: "next-heartbeat",
+        payload: {
+          kind: "httpRequest",
+          url: "http://127.0.0.1:8181/tasks/tsk_once/run",
+          method: "POST",
+          allowPrivateNetwork: true,
+        },
+        delivery: { mode: "none" },
+      });
+
+      const result = await cron.run(created.id, "force");
+      expect(result).toEqual({ ok: true, ran: true });
+
+      const updated = cron.getJob(created.id);
+      expect(updated?.enabled).toBe(true);
+      expect(updated?.state.lastStatus).toBe("error");
+      expect(updated?.state.consecutiveErrors).toBe(0);
+      expect(updated?.state.nextRunAtMs).toBe(Date.now() + 10_000);
+    } finally {
+      cron.stop();
+    }
   });
 
   it("repairs missing nextRunAtMs on non-schedule updates without touching other jobs", async () => {
@@ -754,5 +866,87 @@ describe("Cron issue regressions", () => {
     expect(secondDone?.state.lastRunAtMs).toBe(dueAt + 50);
     expect(secondDone?.state.lastDurationMs).toBe(20);
     expect(startedAtEvents).toEqual([dueAt, dueAt + 50]);
+  });
+
+  it("keeps recurring jobs running across transient vault cron store outages", async () => {
+    const scheduledAt = Date.parse("2026-02-06T10:05:00.000Z");
+    let now = scheduledAt;
+    let failStore = false;
+    let runCount = 0;
+
+    const recurringJob = createIsolatedRegressionJob({
+      id: "vault-restart-recurring",
+      name: "vault restart recurring",
+      scheduledAt,
+      schedule: { kind: "every", everyMs: 60_000, anchorMs: scheduledAt },
+      payload: { kind: "agentTurn", message: "tell me the time" },
+      state: { nextRunAtMs: scheduledAt + 60_000 },
+    });
+    let persistedStore = {
+      version: 1 as const,
+      jobs: [structuredClone(recurringJob)],
+    };
+
+    const bridge = {
+      loadCronStore: vi.fn(async () => {
+        if (failStore) {
+          throw new Error("Vault cron store load failed: 423 Locked");
+        }
+        return structuredClone(persistedStore);
+      }),
+      saveCronStore: vi.fn(async (_storePath: string, store: { version: 1; jobs: CronJob[] }) => {
+        if (failStore) {
+          throw new Error("Vault cron store save failed: 423 Locked");
+        }
+        persistedStore = structuredClone(store);
+      }),
+    };
+    const globalBridge = globalThis as Record<symbol, unknown>;
+    const previousBridge = globalBridge[CRON_STORE_PATCH_KEY];
+    globalBridge[CRON_STORE_PATCH_KEY] = () => bridge;
+
+    try {
+      const state = createCronServiceState({
+        cronEnabled: true,
+        storePath: "/virtual/vault-cron/jobs.json",
+        log: noopLogger,
+        nowMs: () => now,
+        enqueueSystemEvent: vi.fn(),
+        requestHeartbeatNow: vi.fn(),
+        runIsolatedAgentJob: vi.fn(async () => {
+          runCount += 1;
+          now += 1;
+          return { status: "ok" as const, summary: `run-${runCount}` };
+        }),
+      });
+
+      await serviceOps.start(state);
+      expect(state.storeDirty).toBe(false);
+
+      failStore = true;
+      now = scheduledAt + 60_000;
+      await onTimer(state);
+
+      expect(runCount).toBe(1);
+      expect(state.storeDirty).toBe(true);
+      expect(state.store?.jobs[0]?.state.lastStatus).toBe("ok");
+      expect(state.store?.jobs[0]?.state.nextRunAtMs).toBe(scheduledAt + 120_000);
+
+      failStore = false;
+      now = scheduledAt + 120_000;
+      await onTimer(state);
+
+      expect(runCount).toBe(2);
+      expect(state.storeDirty).toBe(false);
+      expect(persistedStore.jobs[0]?.state.lastStatus).toBe("ok");
+      expect(persistedStore.jobs[0]?.state.lastRunAtMs).toBe(scheduledAt + 120_000);
+      expect(typeof persistedStore.jobs[0]?.state.nextRunAtMs).toBe("number");
+    } finally {
+      if (previousBridge === undefined) {
+        delete globalBridge[CRON_STORE_PATCH_KEY];
+      } else {
+        globalBridge[CRON_STORE_PATCH_KEY] = previousBridge;
+      }
+    }
   });
 });

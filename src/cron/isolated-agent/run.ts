@@ -492,6 +492,7 @@ export async function runCronIsolatedAgentTurn(params: {
           runId: cronSession.sessionEntry.sessionId,
           requireExplicitMessageTarget: true,
           disableMessageTool: deliveryRequested,
+          skipGuardModelChecks: agentPayload?.skipGuardModelChecks === true,
         });
       },
     });

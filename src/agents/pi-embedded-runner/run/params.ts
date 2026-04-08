@@ -22,6 +22,8 @@ export type ClientToolDefinition = {
 export type RunEmbeddedPiAgentParams = {
   sessionId: string;
   sessionKey?: string;
+  isHeartbeat?: boolean;
+  skipGuardModelChecks?: boolean;
   agentId?: string;
   messageChannel?: string;
   messageProvider?: string;

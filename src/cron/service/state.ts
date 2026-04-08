@@ -75,6 +75,10 @@ export type CronServiceDeps = {
     } & CronRunOutcome &
       CronRunTelemetry
   >;
+  runHttpRequestJob?: (params: {
+    job: CronJob;
+    payload: Extract<CronJob["payload"], { kind: "httpRequest" }>;
+  }) => Promise<CronRunOutcome & CronRunTelemetry>;
   onEvent?: (evt: CronEvent) => void;
 };
 
@@ -85,6 +89,7 @@ export type CronServiceDepsInternal = Omit<CronServiceDeps, "nowMs"> & {
 export type CronServiceState = {
   deps: CronServiceDepsInternal;
   store: CronStoreFile | null;
+  storeDirty: boolean;
   timer: NodeJS.Timeout | null;
   running: boolean;
   op: Promise<unknown>;
@@ -97,6 +102,7 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
   return {
     deps: { ...deps, nowMs: deps.nowMs ?? (() => Date.now()) },
     store: null,
+    storeDirty: false,
     timer: null,
     running: false,
     op: Promise.resolve(),

@@ -81,6 +81,8 @@ function coercePayload(payload: UnknownRecord) {
     next.kind = "agentTurn";
   } else if (kindRaw === "systemevent") {
     next.kind = "systemEvent";
+  } else if (kindRaw === "httprequest") {
+    next.kind = "httpRequest";
   } else if (kindRaw) {
     next.kind = kindRaw;
   }
@@ -111,6 +113,50 @@ function coercePayload(payload: UnknownRecord) {
     const trimmed = next.text.trim();
     if (trimmed) {
       next.text = trimmed;
+    }
+  }
+  if (typeof next.url === "string") {
+    const trimmed = next.url.trim();
+    if (trimmed) {
+      next.url = trimmed;
+    }
+  }
+  if ("method" in next) {
+    if (typeof next.method === "string") {
+      const upper = next.method.trim().toUpperCase();
+      if (
+        upper === "GET" ||
+        upper === "POST" ||
+        upper === "PUT" ||
+        upper === "PATCH" ||
+        upper === "DELETE"
+      ) {
+        next.method = upper;
+      } else {
+        delete next.method;
+      }
+    } else {
+      delete next.method;
+    }
+  }
+  if ("headers" in next) {
+    if (isRecord(next.headers)) {
+      const headers: UnknownRecord = {};
+      for (const [key, value] of Object.entries(next.headers)) {
+        const normalizedKey = key.trim();
+        if (!normalizedKey || typeof value !== "string") {
+          continue;
+        }
+        headers[normalizedKey] = value;
+      }
+      next.headers = headers;
+    } else {
+      delete next.headers;
+    }
+  }
+  if ("body" in next) {
+    if (typeof next.body !== "string") {
+      delete next.body;
     }
   }
   if ("model" in next) {
@@ -144,11 +190,29 @@ function coercePayload(payload: UnknownRecord) {
       delete next.timeoutSeconds;
     }
   }
+  if ("summary" in next) {
+    if (typeof next.summary === "string") {
+      const trimmed = next.summary.trim();
+      if (trimmed) {
+        next.summary = trimmed;
+      } else {
+        delete next.summary;
+      }
+    } else {
+      delete next.summary;
+    }
+  }
+  if ("allowPrivateNetwork" in next && typeof next.allowPrivateNetwork !== "boolean") {
+    delete next.allowPrivateNetwork;
+  }
   if (
     "allowUnsafeExternalContent" in next &&
     typeof next.allowUnsafeExternalContent !== "boolean"
   ) {
     delete next.allowUnsafeExternalContent;
+  }
+  if ("skipGuardModelChecks" in next && typeof next.skipGuardModelChecks !== "boolean") {
+    delete next.skipGuardModelChecks;
   }
   return next;
 }
@@ -240,6 +304,12 @@ function copyTopLevelAgentTurnFields(next: UnknownRecord, payload: UnknownRecord
   ) {
     payload.allowUnsafeExternalContent = next.allowUnsafeExternalContent;
   }
+  if (
+    typeof payload.skipGuardModelChecks !== "boolean" &&
+    typeof next.skipGuardModelChecks === "boolean"
+  ) {
+    payload.skipGuardModelChecks = next.skipGuardModelChecks;
+  }
 }
 
 function copyTopLevelLegacyDeliveryFields(next: UnknownRecord, payload: UnknownRecord) {
@@ -276,6 +346,7 @@ function stripLegacyTopLevelFields(next: UnknownRecord) {
   delete next.thinking;
   delete next.timeoutSeconds;
   delete next.allowUnsafeExternalContent;
+  delete next.skipGuardModelChecks;
   delete next.message;
   delete next.text;
   delete next.deliver;
@@ -416,7 +487,7 @@ export function normalizeCronJobInput(
       if (kind === "systemEvent") {
         next.sessionTarget = "main";
       }
-      if (kind === "agentTurn") {
+      if (kind === "agentTurn" || kind === "httpRequest") {
         next.sessionTarget = "isolated";
       }
     }

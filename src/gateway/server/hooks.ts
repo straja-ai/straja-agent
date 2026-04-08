@@ -42,6 +42,7 @@ export function createGatewayHooksRequestHandler(params: {
     thinking?: string;
     timeoutSeconds?: number;
     allowUnsafeExternalContent?: boolean;
+    skipGuardModelChecks?: boolean;
   }) => {
     const sessionKey = value.sessionKey.trim();
     const mainSessionKey = resolveMainSessionKeyFromConfig();
@@ -67,6 +68,7 @@ export function createGatewayHooksRequestHandler(params: {
         channel: value.channel,
         to: value.to,
         allowUnsafeExternalContent: value.allowUnsafeExternalContent,
+        skipGuardModelChecks: value.skipGuardModelChecks,
       },
       state: { nextRunAtMs: now },
     };

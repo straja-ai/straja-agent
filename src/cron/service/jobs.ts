@@ -78,8 +78,12 @@ export function assertSupportedJobSpec(job: Pick<CronJob, "sessionTarget" | "pay
   if (job.sessionTarget === "main" && job.payload.kind !== "systemEvent") {
     throw new Error('main cron jobs require payload.kind="systemEvent"');
   }
-  if (job.sessionTarget === "isolated" && job.payload.kind !== "agentTurn") {
-    throw new Error('isolated cron jobs require payload.kind="agentTurn"');
+  if (
+    job.sessionTarget === "isolated" &&
+    job.payload.kind !== "agentTurn" &&
+    job.payload.kind !== "httpRequest"
+  ) {
+    throw new Error('isolated cron jobs require payload.kind="agentTurn" or "httpRequest"');
   }
 }
 
@@ -450,6 +454,27 @@ function mergeCronPayload(existing: CronPayload, patch: CronPayloadPatch): CronP
     return { kind: "systemEvent", text };
   }
 
+  if (patch.kind === "httpRequest") {
+    if (existing.kind !== "httpRequest") {
+      return buildPayloadFromPatch(patch);
+    }
+    return {
+      kind: "httpRequest",
+      url: typeof patch.url === "string" ? patch.url : existing.url,
+      method: typeof patch.method === "string" ? patch.method : existing.method,
+      headers:
+        patch.headers && typeof patch.headers === "object" ? patch.headers : existing.headers,
+      body: typeof patch.body === "string" ? patch.body : existing.body,
+      timeoutSeconds:
+        typeof patch.timeoutSeconds === "number" ? patch.timeoutSeconds : existing.timeoutSeconds,
+      summary: typeof patch.summary === "string" ? patch.summary : existing.summary,
+      allowPrivateNetwork:
+        typeof patch.allowPrivateNetwork === "boolean"
+          ? patch.allowPrivateNetwork
+          : existing.allowPrivateNetwork,
+    };
+  }
+
   if (existing.kind !== "agentTurn") {
     return buildPayloadFromPatch(patch);
   }
@@ -469,6 +494,9 @@ function mergeCronPayload(existing: CronPayload, patch: CronPayloadPatch): CronP
   }
   if (typeof patch.allowUnsafeExternalContent === "boolean") {
     next.allowUnsafeExternalContent = patch.allowUnsafeExternalContent;
+  }
+  if (typeof patch.skipGuardModelChecks === "boolean") {
+    next.skipGuardModelChecks = patch.skipGuardModelChecks;
   }
   if (typeof patch.deliver === "boolean") {
     next.deliver = patch.deliver;
@@ -534,6 +562,22 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
     return { kind: "systemEvent", text: patch.text };
   }
 
+  if (patch.kind === "httpRequest") {
+    if (typeof patch.url !== "string" || patch.url.length === 0) {
+      throw new Error('cron.update payload.kind="httpRequest" requires url');
+    }
+    return {
+      kind: "httpRequest",
+      url: patch.url,
+      method: patch.method,
+      headers: patch.headers,
+      body: patch.body,
+      timeoutSeconds: patch.timeoutSeconds,
+      summary: patch.summary,
+      allowPrivateNetwork: patch.allowPrivateNetwork,
+    };
+  }
+
   if (typeof patch.message !== "string" || patch.message.length === 0) {
     throw new Error('cron.update payload.kind="agentTurn" requires message');
   }
@@ -545,6 +589,7 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
     thinking: patch.thinking,
     timeoutSeconds: patch.timeoutSeconds,
     allowUnsafeExternalContent: patch.allowUnsafeExternalContent,
+    skipGuardModelChecks: patch.skipGuardModelChecks,
     deliver: patch.deliver,
     channel: patch.channel,
     to: patch.to,

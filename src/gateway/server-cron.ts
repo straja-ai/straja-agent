@@ -26,9 +26,39 @@ export type GatewayCronState = {
   cron: CronService;
   storePath: string;
   cronEnabled: boolean;
+  start: () => void;
+  stop: () => void;
 };
 
 const CRON_WEBHOOK_TIMEOUT_MS = 10_000;
+const CRON_START_RETRY_DELAY_MS = 10_000;
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
+}
+
+function isRetryableInternalCronHttpTarget(url: string, allowPrivateNetwork?: boolean): boolean {
+  if (!allowPrivateNetwork) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isRetryableInternalCronHttpStatus(status: number): boolean {
+  return status === 423 || status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableInternalCronHttpErrorMessage(message: string): boolean {
+  return /423\s+Locked|ECONNREFUSED|fetch failed|socket hang up|EPIPE|ETIMEDOUT|ECONNRESET|network error|aborted/i.test(
+    message,
+  );
+}
 
 function redactWebhookUrl(url: string): string {
   try {
@@ -63,6 +93,22 @@ function resolveCronWebhookTarget(params: {
   }
 
   return null;
+}
+
+function isRetryableCronStartError(err: unknown): boolean {
+  let message = "";
+  if (err instanceof Error) {
+    message = err.message;
+  } else if (typeof err === "string") {
+    message = err;
+  } else {
+    try {
+      message = JSON.stringify(err);
+    } catch {
+      message = "";
+    }
+  }
+  return message.includes("423 Locked") || message.includes("Vault cron store load failed");
 }
 
 export function buildGatewayCronService(params: {
@@ -150,6 +196,9 @@ export function buildGatewayCronService(params: {
     });
   const sessionStorePath = resolveSessionStorePath(defaultAgentId);
   const warnedLegacyWebhookJobs = new Set<string>();
+  let disposed = false;
+  let startInFlight = false;
+  let retryTimer: NodeJS.Timeout | null = null;
 
   const cron = new CronService({
     storePath,
@@ -196,6 +245,68 @@ export function buildGatewayCronService(params: {
         sessionKey: `cron:${job.id}`,
         lane: "cron",
       });
+    },
+    runHttpRequestJob: async ({ payload }) => {
+      const method = payload.method ?? "POST";
+      const timeoutMs =
+        typeof payload.timeoutSeconds === "number" && payload.timeoutSeconds > 0
+          ? payload.timeoutSeconds * 1000
+          : CRON_WEBHOOK_TIMEOUT_MS;
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => {
+        abortController.abort();
+      }, timeoutMs);
+      try {
+        const result = await fetchWithSsrFGuard({
+          url: payload.url,
+          init: {
+            method,
+            headers: payload.headers,
+            body: payload.body,
+            signal: abortController.signal,
+          },
+          policy: payload.allowPrivateNetwork
+            ? {
+                allowPrivateNetwork: true,
+                hostnameAllowlist: ["127.0.0.1", "localhost", "::1"],
+              }
+            : undefined,
+          auditContext: payload.allowPrivateNetwork ? "cron-http-request-internal" : "url-fetch",
+        });
+        const { response, release } = result;
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          await release().catch(() => {});
+          const retryable =
+            isRetryableInternalCronHttpTarget(payload.url, payload.allowPrivateNetwork) &&
+            isRetryableInternalCronHttpStatus(response.status);
+          return {
+            status: "error",
+            error: `httpRequest failed (${response.status})${body ? `: ${body.slice(0, 300)}` : ""}`,
+            summary: payload.summary?.trim() || `${method} ${redactWebhookUrl(payload.url)}`,
+            retryable,
+          };
+        }
+        await release().catch(() => {});
+        return {
+          status: "ok",
+          summary: payload.summary?.trim() || `${method} ${redactWebhookUrl(payload.url)}`,
+        };
+      } catch (err) {
+        const message = err instanceof SsrFBlockedError ? err.message : formatErrorMessage(err);
+        const retryable =
+          !(err instanceof SsrFBlockedError) &&
+          isRetryableInternalCronHttpTarget(payload.url, payload.allowPrivateNetwork) &&
+          isRetryableInternalCronHttpErrorMessage(message);
+        return {
+          status: "error",
+          error: message,
+          summary: payload.summary?.trim() || `${method} ${redactWebhookUrl(payload.url)}`,
+          retryable,
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
     },
     log: getChildLogger({ module: "cron", storePath }),
     onEvent: (evt) => {
@@ -310,5 +421,45 @@ export function buildGatewayCronService(params: {
     },
   });
 
-  return { cron, storePath, cronEnabled };
+  const clearRetryTimer = () => {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
+
+  const start = () => {
+    if (disposed || !cronEnabled || startInFlight) {
+      return;
+    }
+    clearRetryTimer();
+    startInFlight = true;
+    void cron
+      .start()
+      .catch((err) => {
+        cronLogger.error(`failed to start: ${String(err)}`);
+        if (disposed || !isRetryableCronStartError(err) || retryTimer) {
+          return;
+        }
+        cronLogger.warn(
+          { retryDelayMs: CRON_START_RETRY_DELAY_MS },
+          "cron: startup deferred; will retry after vault unlock",
+        );
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          start();
+        }, CRON_START_RETRY_DELAY_MS);
+      })
+      .finally(() => {
+        startInFlight = false;
+      });
+  };
+
+  const stop = () => {
+    disposed = true;
+    clearRetryTimer();
+    cron.stop();
+  };
+
+  return { cron, storePath, cronEnabled, start, stop };
 }

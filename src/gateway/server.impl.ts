@@ -538,7 +538,7 @@ export async function startGatewayServer(
       });
 
   if (!minimalTestGateway) {
-    void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));
+    cronState.start();
   }
 
   // Recover pending outbound deliveries from previous crash/restart.
