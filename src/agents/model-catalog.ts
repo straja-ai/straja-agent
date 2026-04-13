@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { type OpenClawConfig, loadConfig } from "../config/config.js";
 import { resolveOpenClawAgentDir } from "./agent-paths.js";
 import { ensureOpenClawModelsJson } from "./models-config.js";
@@ -26,6 +28,15 @@ let modelCatalogPromise: Promise<ModelCatalogEntry[]> | null = null;
 let hasLoggedModelCatalogError = false;
 const defaultImportPiSdk = () => import("./pi-model-discovery.js");
 let importPiSdk = defaultImportPiSdk;
+
+async function hasCachedModelsJson(agentDir: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(agentDir, "models.json"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const CODEX_PROVIDER = "openai-codex";
 
@@ -101,16 +112,21 @@ export async function loadModelCatalog(params?: {
       });
     try {
       const cfg = params?.config ?? loadConfig();
-      await ensureOpenClawModelsJson(cfg);
-      await (
-        await import("./pi-auth-json.js")
-      ).ensurePiAuthJsonFromAuthProfiles(resolveOpenClawAgentDir());
+      const agentDir = resolveOpenClawAgentDir();
+      const shouldRefreshCatalog =
+        params?.useCache === false || !(await hasCachedModelsJson(agentDir));
+      // Avoid live provider discovery on the inbound hot path when a cached
+      // catalog already exists. Explicit refreshes (useCache=false) still
+      // rebuild models.json and re-discover providers.
+      if (shouldRefreshCatalog) {
+        await ensureOpenClawModelsJson(cfg, agentDir);
+      }
+      await (await import("./pi-auth-json.js")).ensurePiAuthJsonFromAuthProfiles(agentDir);
       // IMPORTANT: keep the dynamic import *inside* the try/catch.
       // If this fails once (e.g. during a pnpm install that temporarily swaps node_modules),
       // we must not poison the cache with a rejected promise (otherwise all channel handlers
       // will keep failing until restart).
       const piSdk = await importPiSdk();
-      const agentDir = resolveOpenClawAgentDir();
       const { join } = await import("node:path");
       const authStorage = createAuthStorage(piSdk.AuthStorage, join(agentDir, "auth.json"));
       const registry = new (piSdk.ModelRegistry as unknown as {

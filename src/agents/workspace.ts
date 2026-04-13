@@ -299,6 +299,12 @@ export async function loadWorkspaceBootstrapFiles(dir: string): Promise<Workspac
 }
 
 const MINIMAL_BOOTSTRAP_ALLOWLIST = new Set([DEFAULT_AGENTS_FILENAME, DEFAULT_TOOLS_FILENAME]);
+const LOCAL_MODEL_BOOTSTRAP_ALLOWLIST = new Set([
+  DEFAULT_AGENTS_FILENAME,
+  DEFAULT_SOUL_FILENAME,
+  DEFAULT_IDENTITY_FILENAME,
+  DEFAULT_USER_FILENAME,
+]);
 
 export function filterBootstrapFilesForSession(
   files: WorkspaceBootstrapFile[],
@@ -308,6 +314,12 @@ export function filterBootstrapFilesForSession(
     return files;
   }
   return files.filter((file) => MINIMAL_BOOTSTRAP_ALLOWLIST.has(file.name));
+}
+
+export function filterBootstrapFilesForLocalModel(
+  files: WorkspaceBootstrapFile[],
+): WorkspaceBootstrapFile[] {
+  return files.filter((file) => LOCAL_MODEL_BOOTSTRAP_ALLOWLIST.has(file.name));
 }
 
 export async function loadExtraBootstrapFiles(

@@ -215,6 +215,8 @@ export function createOpenClawCodingTools(options?: {
   disableMessageTool?: boolean;
   /** Whether the sender is an owner (required for owner-only tools). */
   senderIsOwner?: boolean;
+  /** Additional runtime narrowing applied after policy resolution. */
+  toolNameAllowlist?: string[];
 }): AnyAgentTool[] {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
@@ -703,9 +705,15 @@ export function createOpenClawCodingTools(options?: {
   const withAbort = options?.abortSignal
     ? withHooks.map((tool) => wrapToolWithAbortSignal(tool, options.abortSignal))
     : withHooks;
+  if (!options?.toolNameAllowlist || options.toolNameAllowlist.length === 0) {
+    return withAbort;
+  }
+  const allow = new Set(
+    options.toolNameAllowlist.map((entry) => String(entry).trim()).filter(Boolean),
+  );
+  return withAbort.filter((tool) => allow.has(tool.name));
 
   // NOTE: Keep canonical (lowercase) tool names here.
   // pi-ai's Anthropic OAuth transport remaps tool names to Claude Code-style names
   // on the wire and maps them back for tool dispatch.
-  return withAbort;
 }

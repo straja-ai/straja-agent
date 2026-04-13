@@ -24,6 +24,7 @@ type ResolvedAgentConfig = {
   humanDelay?: AgentEntry["humanDelay"];
   heartbeat?: AgentEntry["heartbeat"];
   identity?: AgentEntry["identity"];
+  routing?: AgentEntry["routing"];
   groupChat?: AgentEntry["groupChat"];
   subagents?: AgentEntry["subagents"];
   sandbox?: AgentEntry["sandbox"];
@@ -118,6 +119,7 @@ export function resolveAgentConfig(
     humanDelay: entry.humanDelay,
     heartbeat: entry.heartbeat,
     identity: entry.identity,
+    routing: entry.routing,
     groupChat: entry.groupChat,
     subagents: typeof entry.subagents === "object" && entry.subagents ? entry.subagents : undefined,
     sandbox: entry.sandbox,
@@ -157,6 +159,24 @@ export function resolveAgentModelFallbacksOverride(
     return undefined;
   }
   return Array.isArray(raw.fallbacks) ? raw.fallbacks : undefined;
+}
+
+export function resolveAgentModelPolicy(
+  cfg: OpenClawConfig,
+  agentId: string,
+): "local_only" | "cloud_only" | "hybrid" | undefined {
+  const raw = resolveAgentConfig(cfg, agentId)?.model;
+  if (!raw || typeof raw === "string") {
+    return undefined;
+  }
+  const policy = raw.policy;
+  if (policy === "local_only" || policy === "cloud_only" || policy === "hybrid") {
+    return policy;
+  }
+  if (policy === "prefer_local" || policy === "allow_cloud") {
+    return "hybrid";
+  }
+  return undefined;
 }
 
 export function resolveEffectiveModelFallbacks(params: {

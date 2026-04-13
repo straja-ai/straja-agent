@@ -9,6 +9,15 @@ import type {
 } from "./types.sandbox.js";
 import type { AgentToolsConfig, MemorySearchConfig } from "./types.tools.js";
 
+export type AgentRoutingConfig = {
+  purpose?: string;
+  primaryDomains?: string[];
+  preferredTaskTypes?: string[];
+  forbiddenTaskTypes?: string[];
+  toolFamiliesAvailable?: string[];
+  shortExamples?: string[];
+};
+
 export type AgentModelConfig =
   | string
   | {
@@ -16,6 +25,8 @@ export type AgentModelConfig =
       primary?: string;
       /** Per-agent model fallbacks (provider/model). */
       fallbacks?: string[];
+      /** How this agent should treat local vs cloud candidates. */
+      policy?: "local_only" | "cloud_only" | "hybrid";
     };
 
 export type AgentConfig = {
@@ -33,12 +44,19 @@ export type AgentConfig = {
   /** Optional per-agent heartbeat overrides. */
   heartbeat?: AgentDefaultsConfig["heartbeat"];
   identity?: IdentityConfig;
+  routing?: AgentRoutingConfig;
   groupChat?: GroupChatConfig;
   subagents?: {
     /** Allow spawning sub-agents under other agent ids. Use "*" to allow any. */
     allowAgents?: string[];
     /** Per-agent default model for spawned sub-agents (string or {primary,fallbacks}). */
-    model?: string | { primary?: string; fallbacks?: string[] };
+    model?:
+      | string
+      | {
+          primary?: string;
+          fallbacks?: string[];
+          policy?: "local_only" | "cloud_only" | "hybrid";
+        };
   };
   sandbox?: {
     mode?: "off" | "non-main" | "all";

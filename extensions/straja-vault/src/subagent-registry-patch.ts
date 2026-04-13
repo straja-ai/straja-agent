@@ -13,6 +13,18 @@ export type SubagentRegistryPatchOps = {
   saveSubagentRegistry: (runs: Record<string, unknown>) => void;
 };
 
+function isTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return [
+    "ETIMEDOUT",
+    "request timed out",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "HTTP 503",
+    "aborted",
+  ].some((p) => msg.includes(p));
+}
+
 function syncHttpGet(url: string): { status: number; body: string } {
   const args = appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]);
   try {
@@ -71,38 +83,64 @@ function syncHttpPut(url: string, body: string): { status: number; locked: boole
 
 function createVaultSubagentRegistryOps(baseUrl: string): SubagentRegistryPatchOps {
   const url = `${baseUrl}/raw/${COLLECTION}/${encodeURIComponent(REGISTRY_KEY)}`;
+  let cachedRuns: Record<string, unknown> = {};
 
   const loadSubagentRegistry = (): Record<string, unknown> => {
-    const resp = syncHttpGet(url);
-    if (resp.status === 404) {
-      return {};
+    try {
+      const resp = syncHttpGet(url);
+      if (resp.status === 404) {
+        cachedRuns = {};
+        return {};
+      }
+      if (resp.status === 423) {
+        // The gateway should still be able to boot while Vault is locked.
+        // Treat the registry as temporarily unavailable and fall back to an empty in-memory view.
+        cachedRuns = {};
+        return {};
+      }
+      if (resp.status !== 200) {
+        throw new Error(`Vault subagent-registry read failed (${resp.status})`);
+      }
+      if (!resp.body.trim()) {
+        cachedRuns = {};
+        return {};
+      }
+      const parsed = JSON.parse(resp.body) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Vault subagent-registry payload is not an object");
+      }
+      cachedRuns = parsed as Record<string, unknown>;
+      return cachedRuns;
+    } catch (err) {
+      if (isTransientError(err)) {
+        console.warn(
+          `[straja-vault] subagent-registry GET failed (transient), using cached registry: ${err instanceof Error ? err.message : err}`,
+        );
+        return cachedRuns;
+      }
+      throw err;
     }
-    if (resp.status === 423) {
-      // The gateway should still be able to boot while Vault is locked.
-      // Treat the registry as temporarily unavailable and fall back to an empty in-memory view.
-      return {};
-    }
-    if (resp.status !== 200) {
-      throw new Error(`Vault subagent-registry read failed (${resp.status})`);
-    }
-    if (!resp.body.trim()) {
-      return {};
-    }
-    const parsed = JSON.parse(resp.body) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Vault subagent-registry payload is not an object");
-    }
-    return parsed as Record<string, unknown>;
   };
 
   const saveSubagentRegistry = (runs: Record<string, unknown>) => {
     const body = JSON.stringify(runs, null, 2);
-    const result = syncHttpPut(url, body);
-    if (result.locked) {
-      // The gateway should still be able to boot and run while Vault is locked.
-      // Treat persistence as temporarily unavailable and keep the current
-      // in-memory subagent registry state until Vault is unlocked.
-      return;
+    cachedRuns = runs;
+    try {
+      const result = syncHttpPut(url, body);
+      if (result.locked) {
+        // The gateway should still be able to boot and run while Vault is locked.
+        // Treat persistence as temporarily unavailable and keep the current
+        // in-memory subagent registry state until Vault is unlocked.
+        return;
+      }
+    } catch (err) {
+      if (isTransientError(err)) {
+        console.warn(
+          `[straja-vault] subagent-registry PUT failed (transient), cached locally: ${err instanceof Error ? err.message : err}`,
+        );
+        return;
+      }
+      throw err;
     }
   };
 

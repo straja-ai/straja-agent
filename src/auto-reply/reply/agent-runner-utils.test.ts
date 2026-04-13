@@ -3,13 +3,19 @@ import type { FollowupRun } from "./queue.js";
 
 const hoisted = vi.hoisted(() => {
   const resolveAgentModelFallbacksOverrideMock = vi.fn();
+  const resolveAgentModelPolicyMock = vi.fn();
   const resolveAgentIdFromSessionKeyMock = vi.fn();
-  return { resolveAgentModelFallbacksOverrideMock, resolveAgentIdFromSessionKeyMock };
+  return {
+    resolveAgentModelFallbacksOverrideMock,
+    resolveAgentModelPolicyMock,
+    resolveAgentIdFromSessionKeyMock,
+  };
 });
 
 vi.mock("../../agents/agent-scope.js", () => ({
   resolveAgentModelFallbacksOverride: (...args: unknown[]) =>
     hoisted.resolveAgentModelFallbacksOverrideMock(...args),
+  resolveAgentModelPolicy: (...args: unknown[]) => hoisted.resolveAgentModelPolicyMock(...args),
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -51,12 +57,14 @@ function makeRun(overrides: Partial<FollowupRun["run"]> = {}): FollowupRun["run"
 describe("agent-runner-utils", () => {
   beforeEach(() => {
     hoisted.resolveAgentModelFallbacksOverrideMock.mockReset();
+    hoisted.resolveAgentModelPolicyMock.mockReset();
     hoisted.resolveAgentIdFromSessionKeyMock.mockReset();
   });
 
   it("resolves model fallback options from run context", () => {
     hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
     hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue(["fallback-model"]);
+    hoisted.resolveAgentModelPolicyMock.mockReturnValue("hybrid");
     const run = makeRun();
 
     const resolved = resolveModelFallbackOptions(run);
@@ -66,13 +74,29 @@ describe("agent-runner-utils", () => {
       run.config,
       "agent-id",
     );
+    expect(hoisted.resolveAgentModelPolicyMock).toHaveBeenCalledWith(run.config, "agent-id");
     expect(resolved).toEqual({
       cfg: run.config,
       provider: run.provider,
       model: run.model,
       agentDir: run.agentDir,
       fallbacksOverride: ["fallback-model"],
+      policyOverride: "hybrid",
     });
+  });
+
+  it("relaxes impossible local_only policy when the selected run model is cloud", () => {
+    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
+    hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue([]);
+    hoisted.resolveAgentModelPolicyMock.mockReturnValue("local_only");
+    const run = makeRun({
+      provider: "openai-codex",
+      model: "gpt-5.4",
+    });
+
+    const resolved = resolveModelFallbackOptions(run);
+
+    expect(resolved.policyOverride).toBe("hybrid");
   });
 
   it("builds embedded run base params with auth profile and run metadata", () => {

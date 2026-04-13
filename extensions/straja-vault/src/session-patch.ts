@@ -57,6 +57,18 @@ export const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
 /** Marker set on SessionManager.prototype when vault patch is active. */
 const SESSION_PATCH_APPLIED_KEY = Symbol.for("openclaw.sessionPatchApplied");
 
+function isTransientSessionReadError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return [
+    "ETIMEDOUT",
+    "request timed out",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "HTTP 503",
+    "aborted",
+  ].some((part) => msg.includes(part));
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -322,12 +334,22 @@ function applyPatch(
     const key = sessionPathToVaultKey(resolvedPath);
 
     // Read from vault (synchronous)
-    const resp = syncHttpGet(rawUrl(key));
     let vaultEntries: any[] = [];
-    if (resp.status === 200 && resp.body.trim()) {
-      vaultEntries = parseSessionEntries(resp.body);
-    } else if (resp.status !== 404) {
-      throw new Error(`Vault session read failed (${resp.status}) for key ${key}`);
+    try {
+      const resp = syncHttpGet(rawUrl(key));
+      if (resp.status === 200 && resp.body.trim()) {
+        vaultEntries = parseSessionEntries(resp.body);
+      } else if (resp.status !== 404) {
+        throw new Error(`Vault session read failed (${resp.status}) for key ${key}`);
+      }
+    } catch (err: unknown) {
+      if (!isTransientSessionReadError(err)) {
+        throw err;
+      }
+      console.warn(
+        `[straja-vault] session GET failed (transient), using empty transcript: ${err instanceof Error ? err.message : err}`,
+      );
+      vaultEntries = [];
     }
 
     this.sessionFile = resolvedPath;

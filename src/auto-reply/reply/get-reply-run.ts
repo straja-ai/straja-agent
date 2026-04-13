@@ -190,7 +190,13 @@ export async function runPreparedReply(
   const inboundMetaPrompt = buildInboundMetaSystemPrompt(
     isNewSession ? sessionCtx : { ...sessionCtx, ThreadStarterBody: undefined },
   );
-  const extraSystemPrompt = [inboundMetaPrompt, groupChatContext, groupIntro, groupSystemPrompt]
+  const extraSystemPrompt = [
+    inboundMetaPrompt,
+    groupChatContext,
+    groupIntro,
+    groupSystemPrompt,
+    opts?.extraSystemPrompt?.trim(),
+  ]
     .filter(Boolean)
     .join("\n\n");
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
@@ -215,7 +221,7 @@ export async function runPreparedReply(
     isNewSession
       ? {
           ...sessionCtx,
-          ...(sessionCtx.ThreadHistoryBody?.trim()
+          ...(opts?.suppressThreadHistory || sessionCtx.ThreadHistoryBody?.trim()
             ? { InboundHistory: undefined, ThreadStarterBody: undefined }
             : {}),
         }
@@ -260,9 +266,11 @@ export async function runPreparedReply(
     prefixedBodyBase,
   });
   prefixedBodyBase = appendFlowContext(prefixedBodyBase, sessionCtx.FlowContext);
-  prefixedBodyBase = appendUntrustedContext(prefixedBodyBase, sessionCtx.UntrustedContext);
-  const threadStarterBody = ctx.ThreadStarterBody?.trim();
-  const threadHistoryBody = ctx.ThreadHistoryBody?.trim();
+  if (!opts?.suppressUntrustedContext) {
+    prefixedBodyBase = appendUntrustedContext(prefixedBodyBase, sessionCtx.UntrustedContext);
+  }
+  const threadStarterBody = opts?.suppressThreadHistory ? undefined : ctx.ThreadStarterBody?.trim();
+  const threadHistoryBody = opts?.suppressThreadHistory ? undefined : ctx.ThreadHistoryBody?.trim();
   const threadContextNote =
     isNewSession && threadHistoryBody
       ? `[Thread history - for context]\n${threadHistoryBody}`
@@ -436,6 +444,7 @@ export async function runPreparedReply(
       workspaceDir,
       config: cfg,
       skillsSnapshot,
+      toolAllowlistOverride: opts?.toolAllowlistOverride,
       provider,
       model,
       authProfileId,
@@ -454,6 +463,9 @@ export async function runPreparedReply(
       blockReplyBreak: resolvedBlockStreamingBreak,
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       extraSystemPrompt: extraSystemPrompt || undefined,
+      promptModeOverride: opts?.promptModeOverride,
+      orchestrationTraceId: opts?.orchestrationTraceId,
+      historyLimitOverride: opts?.historyLimitOverride,
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),
     },
   };

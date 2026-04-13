@@ -1,11 +1,15 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import { resolveOpenClawAgentDir } from "./agent-paths.js";
 import { __setModelCatalogImportForTest, loadModelCatalog } from "./model-catalog.js";
 import {
   installModelCatalogTestHooks,
   mockCatalogImportFailThenRecover,
   type PiSdkModule,
 } from "./model-catalog.test-harness.js";
+import * as modelsConfig from "./models-config.js";
 
 describe("loadModelCatalog", () => {
   installModelCatalogTestHooks();
@@ -90,5 +94,38 @@ describe("loadModelCatalog", () => {
     const spark = result.find((entry) => entry.id === "gpt-5.3-codex-spark");
     expect(spark?.name).toBe("gpt-5.3-codex-spark");
     expect(spark?.reasoning).toBe(true);
+  });
+
+  it("uses cached models.json on the hot path without refreshing discovery", async () => {
+    const ensureSpy = vi.spyOn(modelsConfig, "ensureOpenClawModelsJson");
+    const agentDir = resolveOpenClawAgentDir();
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agentDir, "models.json"),
+      JSON.stringify({
+        providers: {
+          openai: {
+            models: [{ id: "gpt-4.1", name: "GPT-4.1" }],
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    __setModelCatalogImportForTest(
+      async () =>
+        ({
+          AuthStorage: class {},
+          ModelRegistry: class {
+            getAll() {
+              return [{ id: "gpt-4.1", name: "GPT-4.1", provider: "openai" }];
+            }
+          },
+        }) as unknown as PiSdkModule,
+    );
+
+    await loadModelCatalog({ config: {} as OpenClawConfig });
+
+    expect(ensureSpy).not.toHaveBeenCalled();
   });
 });

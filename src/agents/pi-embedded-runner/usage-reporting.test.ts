@@ -10,6 +10,46 @@ describe("runEmbeddedPiAgent usage reporting", () => {
     vi.clearAllMocks();
   });
 
+  it("forwards orchestration overrides into runEmbeddedAttempt", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce({
+      aborted: false,
+      promptError: null,
+      timedOut: false,
+      sessionIdUsed: "test-session",
+      assistantTexts: ["ok"],
+      lastAssistant: {
+        usage: { input: 1, output: 1, total: 2 },
+        stopReason: "end_turn",
+      },
+      attemptUsage: { input: 1, output: 1, total: 2 },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await runEmbeddedPiAgent({
+      sessionId: "test-session",
+      sessionKey: "test-key",
+      sessionFile: "/tmp/session.json",
+      workspaceDir: "/tmp/workspace",
+      prompt: "hello",
+      timeoutMs: 30000,
+      runId: "run-forwarding",
+      orchestrationTraceId: "trace-123",
+      promptModeOverride: "local_worker",
+      historyLimitOverride: 4,
+      toolAllowlistOverride: ["vault_get", "vault_search"],
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orchestrationTraceId: "trace-123",
+        promptModeOverride: "local_worker",
+        historyLimitOverride: 4,
+        toolAllowlistOverride: ["vault_get", "vault_search"],
+      }),
+    );
+  });
+
   it("reports total usage from the last turn instead of accumulated total", async () => {
     // Simulate a multi-turn run result.
     // Turn 1: Input 100, Output 50. Total 150.

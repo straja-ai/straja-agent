@@ -96,6 +96,7 @@ export type HeartbeatSummary = {
 };
 
 const DEFAULT_HEARTBEAT_TARGET = "last";
+const IMPLICIT_HEARTBEAT_SESSION_ALIAS = "__heartbeat__";
 
 // Prompt used when an async exec has completed and the result should be relayed to the user.
 // This overrides the standard heartbeat prompt to ensure the model responds with the exec result
@@ -247,6 +248,14 @@ export function resolveHeartbeatPrompt(cfg: OpenClawConfig, heartbeat?: Heartbea
   return resolveHeartbeatPromptText(heartbeat?.prompt ?? cfg.agents?.defaults?.heartbeat?.prompt);
 }
 
+export function resolveImplicitHeartbeatSessionKey(cfg: OpenClawConfig, agentId?: string): string {
+  return toAgentStoreSessionKey({
+    agentId: normalizeAgentId(agentId ?? resolveDefaultAgentId(cfg)),
+    requestKey: IMPLICIT_HEARTBEAT_SESSION_ALIAS,
+    mainKey: cfg.session?.mainKey,
+  });
+}
+
 function resolveHeartbeatAckMaxChars(cfg: OpenClawConfig, heartbeat?: HeartbeatConfig) {
   return Math.max(
     0,
@@ -274,8 +283,17 @@ function resolveHeartbeatSession(
   const store = loadSessionStore(storePath);
   const mainEntry = store[mainSessionKey];
 
+  const implicitHeartbeatSessionKey = resolveImplicitHeartbeatSessionKey(cfg, resolvedAgentId);
+  const implicitHeartbeatEntry = store[implicitHeartbeatSessionKey];
+
   if (scope === "global") {
-    return { sessionKey: mainSessionKey, storePath, store, entry: mainEntry };
+    return {
+      sessionKey: mainSessionKey,
+      storePath,
+      store,
+      entry: mainEntry,
+      deliveryEntry: mainEntry,
+    };
   }
 
   const forced = forcedSessionKey?.trim();
@@ -298,6 +316,7 @@ function resolveHeartbeatSession(
           storePath,
           store,
           entry: store[forcedCanonical],
+          deliveryEntry: store[forcedCanonical],
         };
       }
     }
@@ -305,12 +324,24 @@ function resolveHeartbeatSession(
 
   const trimmed = heartbeat?.session?.trim() ?? "";
   if (!trimmed) {
-    return { sessionKey: mainSessionKey, storePath, store, entry: mainEntry };
+    return {
+      sessionKey: implicitHeartbeatSessionKey,
+      storePath,
+      store,
+      entry: implicitHeartbeatEntry,
+      deliveryEntry: mainEntry,
+    };
   }
 
   const normalized = trimmed.toLowerCase();
   if (normalized === "main" || normalized === "global") {
-    return { sessionKey: mainSessionKey, storePath, store, entry: mainEntry };
+    return {
+      sessionKey: mainSessionKey,
+      storePath,
+      store,
+      entry: mainEntry,
+      deliveryEntry: mainEntry,
+    };
   }
 
   const candidate = toAgentStoreSessionKey({
@@ -331,11 +362,18 @@ function resolveHeartbeatSession(
         storePath,
         store,
         entry: store[canonical],
+        deliveryEntry: store[canonical],
       };
     }
   }
 
-  return { sessionKey: mainSessionKey, storePath, store, entry: mainEntry };
+  return {
+    sessionKey: mainSessionKey,
+    storePath,
+    store,
+    entry: mainEntry,
+    deliveryEntry: mainEntry,
+  };
 }
 
 function resolveHeartbeatReasoningPayloads(
@@ -615,10 +653,10 @@ export async function runHeartbeatOnce(opts: {
     });
     return { status: "skipped", reason: preflight.skipReason };
   }
-  const { entry, sessionKey, storePath } = preflight.session;
+  const { entry, deliveryEntry = entry, sessionKey, storePath } = preflight.session;
   const { isCronEventReason, pendingEventEntries } = preflight;
   const previousUpdatedAt = entry?.updatedAt;
-  const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry, heartbeat });
+  const delivery = resolveHeartbeatDeliveryTarget({ cfg, entry: deliveryEntry, heartbeat });
   const heartbeatAccountId = heartbeat?.accountId?.trim();
   if (delivery.reason === "unknown-account") {
     log.warn("heartbeat: unknown accountId", {
@@ -640,7 +678,7 @@ export async function runHeartbeatOnce(opts: {
           accountId: delivery.accountId,
         })
       : { showOk: false, showAlerts: true, useIndicator: true };
-  const { sender } = resolveHeartbeatSenderContext({ cfg, entry, delivery });
+  const { sender } = resolveHeartbeatSenderContext({ cfg, entry: deliveryEntry, delivery });
   const responsePrefix = resolveEffectiveMessagesConfig(cfg, agentId, {
     channel: delivery.channel !== "none" ? delivery.channel : undefined,
     accountId: delivery.accountId,

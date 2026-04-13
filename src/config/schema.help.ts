@@ -60,6 +60,14 @@ export const FIELD_HELP: Record<string, string> = {
     "Include full message payloads in trace output (default: true).",
   "diagnostics.cacheTrace.includePrompt": "Include prompt text in trace output (default: true).",
   "diagnostics.cacheTrace.includeSystem": "Include system prompt in trace output (default: true).",
+  "diagnostics.orchestrationTrace.enabled":
+    "Log orchestration routing events as JSONL metadata only (default: false).",
+  "diagnostics.orchestrationTrace.filePath":
+    "JSONL output path for orchestration trace logs (default: $OPENCLAW_STATE_DIR/logs/orchestration-trace.jsonl).",
+  "diagnostics.orchestrationTrace.includeContext":
+    "Include non-sensitive context metrics in orchestration trace output (default: true).",
+  "diagnostics.orchestrationTrace.includePolicyChecks":
+    "Include policy check results in orchestration trace output (default: true).",
   "tools.exec.applyPatch.enabled":
     "Experimental. Enables apply_patch for OpenAI models when allowed by tool policy.",
   "tools.exec.applyPatch.workspaceOnly":
@@ -164,6 +172,28 @@ export const FIELD_HELP: Record<string, string> = {
     "Max characters of each workspace bootstrap file injected into the system prompt before truncation (default: 20000).",
   "agents.defaults.bootstrapTotalMaxChars":
     "Max total characters across all injected workspace bootstrap files (default: 150000).",
+  "agents.defaults.orchestration.enabled":
+    "Enable the orchestration control layer for inbound runs (default: true).",
+  "agents.defaults.orchestration.router.enabled":
+    "Enable the model-driven local router for inbound agent/tool/context selection (default: true).",
+  "agents.defaults.orchestration.router.model":
+    "Local router model (provider/model or alias). Defaults to the local fast-path model, then ollama/gemma4:e4b.",
+  "agents.defaults.orchestration.router.timeoutMs":
+    "Timeout in milliseconds for the local router model call (default: 12000).",
+  "agents.defaults.orchestration.router.maxTokens":
+    "Maximum output tokens for the local router JSON decision (default: 320).",
+  "agents.defaults.orchestration.localFastPath.enabled":
+    "Enable the hidden local fast-path worker for simple inbound automation.",
+  "agents.defaults.orchestration.localFastPath.model":
+    "Hidden local worker model (provider/model or alias) used when the fast-path is selected.",
+  "agents.defaults.orchestration.localFastPath.maxInputChars":
+    "Maximum inbound body size allowed for local fast-path execution (default: 1200).",
+  "agents.defaults.orchestration.localFastPath.requireFlowContext":
+    "Require trusted flow context before allowing local fast-path execution (default: true).",
+  "agents.defaults.orchestration.localFastPath.allowMedia":
+    "Allow media-bearing turns through the local fast-path worker (default: false).",
+  "agents.defaults.orchestration.localFastPath.promptMode":
+    'Prompt profile used for local fast-path runs ("local_worker" default, or "compact"/"minimal").',
   "agents.defaults.repoRoot":
     "Optional repository root shown in the system prompt runtime line (overrides auto-detect).",
   "agents.defaults.envelopeTimezone":

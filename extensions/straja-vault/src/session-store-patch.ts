@@ -133,6 +133,12 @@ function createVaultSessionStoreOps(baseUrl: string): SessionStorePatchOps {
           );
           return cached;
         }
+        console.warn(
+          `[straja-vault] session-store GET failed (transient), using empty store: ${err instanceof Error ? err.message : err}`,
+        );
+        const empty = {};
+        cache.set(key, empty);
+        return empty;
       }
       throw err;
     }

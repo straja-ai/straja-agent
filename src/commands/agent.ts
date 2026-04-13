@@ -2,6 +2,7 @@ import {
   listAgentIds,
   resolveAgentDir,
   resolveEffectiveModelFallbacks,
+  resolveAgentModelPolicy,
   resolveAgentModelPrimary,
   resolveAgentSkillsFilter,
   resolveAgentWorkspaceDir,
@@ -539,6 +540,7 @@ export async function agentCommand(
         model,
         agentDir,
         fallbacksOverride: effectiveFallbacksOverride,
+        policyOverride: resolveAgentModelPolicy(cfg, sessionAgentId),
         run: (providerOverride, modelOverride) => {
           const isFallbackRetry = fallbackAttemptIndex > 0;
           fallbackAttemptIndex += 1;

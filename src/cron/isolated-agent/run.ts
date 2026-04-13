@@ -2,6 +2,7 @@ import {
   resolveAgentConfig,
   resolveAgentDir,
   resolveAgentModelFallbacksOverride,
+  resolveAgentModelPolicy,
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../../agents/agent-scope.js";
@@ -453,6 +454,7 @@ export async function runCronIsolatedAgentTurn(params: {
       model,
       agentDir,
       fallbacksOverride: resolveAgentModelFallbacksOverride(params.cfg, agentId),
+      policyOverride: resolveAgentModelPolicy(params.cfg, agentId),
       run: (providerOverride, modelOverride) => {
         if (isCliProvider(providerOverride, cfgWithAgentDefaults)) {
           const cliSessionId = getCliSessionId(cronSession.sessionEntry, providerOverride);

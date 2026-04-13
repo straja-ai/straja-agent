@@ -1,5 +1,10 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
+import {
+  persistOrchestrationPromptInput,
+  persistOrchestrationPromptOutput,
+  persistOrchestrationStep,
+} from "../auto-reply/reply/orchestration-vault.js";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
@@ -45,6 +50,7 @@ export async function runCliAgent(params: {
   thinkLevel?: ThinkLevel;
   timeoutMs: number;
   runId: string;
+  orchestrationTraceId?: string;
   extraSystemPrompt?: string;
   streamParams?: import("../commands/agent/types.js").AgentStreamParams;
   ownerNumbers?: string[];
@@ -173,6 +179,63 @@ export async function runCliAgent(params: {
     promptArg: argsPrompt,
     useResume,
   });
+
+  const persistTraceAsync = (task: Promise<void>) => {
+    void task.catch((err) => {
+      log.warn(`orchestration trace persistence failed: ${String(err)}`);
+    });
+  };
+
+  if (params.orchestrationTraceId) {
+    persistTraceAsync(
+      persistOrchestrationPromptInput({
+        traceId: params.orchestrationTraceId,
+        runId: params.runId,
+        sessionId: params.sessionId,
+        provider: params.provider,
+        model: modelId,
+        systemPrompt,
+        prompt,
+        historyMessages: [],
+        imagesCount: params.images?.length ?? 0,
+        toolDefinitions: [],
+        toolAllowlist: [],
+        systemPromptReport: {
+          transport: "cli",
+          backend: backendResolved.id,
+          isNewSession: isNew,
+          useResume,
+          cliSessionId: cliSessionIdToSend,
+          sessionIdSent,
+          systemPromptPassed: Boolean(systemPromptArg),
+          contextFileCount: contextFiles.length,
+        },
+      }),
+    );
+    persistTraceAsync(
+      persistOrchestrationStep({
+        traceId: params.orchestrationTraceId,
+        stage: "llm_input",
+        data: {
+          runId: params.runId,
+          sessionId: params.sessionId,
+          provider: params.provider,
+          model: modelId,
+          transport: "cli",
+          backend: backendResolved.id,
+          systemPromptChars: systemPrompt.length,
+          promptChars: prompt.length,
+          historyMessageCount: 0,
+          toolDefinitionCount: 0,
+          toolAllowlist: [],
+          imagesCount: params.images?.length ?? 0,
+          cliSessionId: cliSessionIdToSend,
+          sessionIdSent,
+          useResume,
+        },
+      }),
+    );
+  }
 
   const serialize = backend.serialize ?? true;
   const queueKey = serialize ? backendResolved.id : `${backendResolved.id}:${params.runId}`;
@@ -322,6 +385,42 @@ export async function runCliAgent(params: {
     const text = output.text?.trim();
     const payloads = text ? [{ text }] : undefined;
 
+    if (params.orchestrationTraceId) {
+      persistTraceAsync(
+        persistOrchestrationPromptOutput({
+          traceId: params.orchestrationTraceId,
+          runId: params.runId,
+          sessionId: params.sessionId,
+          provider: params.provider,
+          model: modelId,
+          assistantTexts: text ? [text] : [],
+          lastAssistant: text
+            ? {
+                role: "assistant",
+                content: [{ type: "text", text }],
+              }
+            : undefined,
+          usage: output.usage,
+        }),
+      );
+      persistTraceAsync(
+        persistOrchestrationStep({
+          traceId: params.orchestrationTraceId,
+          stage: "llm_output",
+          data: {
+            runId: params.runId,
+            sessionId: params.sessionId,
+            provider: params.provider,
+            model: modelId,
+            transport: "cli",
+            backend: backendResolved.id,
+            assistantTextCount: text ? 1 : 0,
+            usage: output.usage,
+          },
+        }),
+      );
+    }
+
     return {
       payloads,
       meta: {
@@ -370,6 +469,7 @@ export async function runClaudeCliAgent(params: {
   thinkLevel?: ThinkLevel;
   timeoutMs: number;
   runId: string;
+  orchestrationTraceId?: string;
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
   claudeSessionId?: string;
@@ -388,6 +488,7 @@ export async function runClaudeCliAgent(params: {
     thinkLevel: params.thinkLevel,
     timeoutMs: params.timeoutMs,
     runId: params.runId,
+    orchestrationTraceId: params.orchestrationTraceId,
     extraSystemPrompt: params.extraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
     cliSessionId: params.claudeSessionId,
