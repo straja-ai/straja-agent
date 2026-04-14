@@ -9,6 +9,7 @@ import { getApiKeyForModel, requireApiKey } from "../../agents/model-auth.js";
 import { buildModelAliasIndex, resolveModelRefFromString } from "../../agents/model-selection.js";
 import { createOllamaStreamFn } from "../../agents/ollama-stream.js";
 import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
+import { normalizeUsage } from "../../agents/usage.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { logVerbose } from "../../globals.js";
 import { clampNumber, safeParseJson } from "../../utils.js";
@@ -110,6 +111,30 @@ function collectKeywords(text: string): string[] {
 
 function uniq<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function truncateText(value: string | null | undefined, maxChars: number): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(1, maxChars - 1)).trim()}…`;
+}
+
+function compactList(values: string[] | undefined, maxItems: number, maxChars: number): string[] {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  return values
+    .map((entry) => truncateText(entry, maxChars))
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, maxItems);
 }
 
 function isTrivialLocalTurn(body: string): boolean {
@@ -337,8 +362,8 @@ function resolveRouterSettings(cfg: OpenClawConfig) {
   return {
     enabled: orchestration?.enabled !== false && router?.enabled !== false,
     model: router?.model?.trim() || localFastPath?.model?.trim() || "ollama/gemma4:e4b",
-    timeoutMs: router?.timeoutMs ?? 12_000,
-    maxTokens: router?.maxTokens ?? 320,
+    timeoutMs: router?.timeoutMs ?? 60_000,
+    maxTokens: router?.maxTokens ?? 180,
   };
 }
 
@@ -347,25 +372,23 @@ function buildAgentCatalog(cfg: OpenClawConfig, currentAgentId?: string) {
     const resolved = resolveAgentConfig(cfg, entry.id);
     const routing: AgentRoutingProfile | undefined = resolved?.routing
       ? {
-          purpose: resolved.routing.purpose ?? null,
-          primaryDomains: resolved.routing.primaryDomains ?? [],
-          preferredTaskTypes: resolved.routing.preferredTaskTypes ?? [],
-          forbiddenTaskTypes: resolved.routing.forbiddenTaskTypes ?? [],
-          toolFamiliesAvailable: resolved.routing.toolFamiliesAvailable ?? [],
-          shortExamples: resolved.routing.shortExamples ?? [],
+          purpose: truncateText(resolved.routing.purpose ?? null, 120),
+          primaryDomains: compactList(resolved.routing.primaryDomains, 3, 32),
+          preferredTaskTypes: compactList(resolved.routing.preferredTaskTypes, 3, 48),
+          forbiddenTaskTypes: compactList(resolved.routing.forbiddenTaskTypes, 2, 48),
+          toolFamiliesAvailable: compactList(resolved.routing.toolFamiliesAvailable, 4, 24),
+          shortExamples: compactList(resolved.routing.shortExamples, 2, 64),
         }
       : undefined;
     return {
       id: entry.id,
-      name: entry.name ?? null,
       isCurrent: entry.id === currentAgentId,
-      skills: resolved?.skills ?? [],
-      identity: {
-        name: resolved?.identity?.name ?? null,
-        theme: resolved?.identity?.theme ?? null,
-      },
+      label: truncateText(
+        entry.name ?? resolved?.identity?.name ?? resolved?.identity?.theme ?? entry.id,
+        48,
+      ),
       routing,
-      tools: resolved?.tools?.alsoAllow ?? [],
+      tools: compactList(resolved?.tools?.alsoAllow, 5, 24),
     };
   });
 }
@@ -412,8 +435,38 @@ function buildRouterPrompt(params: {
   cfg: OpenClawConfig;
 }): string {
   const agentCatalog = buildAgentCatalog(params.cfg, params.currentAgentId);
+  const inboundBody = truncateText(params.body, 700) ?? "";
+  const flowHints = params.flowContext
+    .map((entry) => truncateText(entry, 180))
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, 2);
+  const candidateLines = agentCatalog.map((candidate) => {
+    const parts = [
+      `id=${candidate.id}`,
+      candidate.label ? `label=${candidate.label}` : null,
+      candidate.isCurrent ? "current=yes" : null,
+      candidate.routing?.purpose ? `purpose=${candidate.routing.purpose}` : null,
+      candidate.routing?.primaryDomains?.length
+        ? `domains=${candidate.routing.primaryDomains.join(", ")}`
+        : null,
+      candidate.routing?.preferredTaskTypes?.length
+        ? `prefers=${candidate.routing.preferredTaskTypes.join(" | ")}`
+        : null,
+      candidate.routing?.forbiddenTaskTypes?.length
+        ? `avoid=${candidate.routing.forbiddenTaskTypes.join(" | ")}`
+        : null,
+      candidate.routing?.toolFamiliesAvailable?.length
+        ? `tool_families=${candidate.routing.toolFamiliesAvailable.join(", ")}`
+        : null,
+      candidate.routing?.shortExamples?.length
+        ? `examples=${candidate.routing.shortExamples.join(" | ")}`
+        : null,
+      candidate.tools.length ? `extra_tools=${candidate.tools.join(", ")}` : null,
+    ].filter((entry): entry is string => Boolean(entry));
+    return `- ${parts.join("; ")}`;
+  });
   return [
-    "Return a JSON object with this exact shape:",
+    "Return one JSON object with this exact shape and no extra text:",
     JSON.stringify(
       {
         selectedAgentId: "agent-id",
@@ -429,30 +482,87 @@ function buildRouterPrompt(params: {
       2,
     ),
     "",
-    "Decision inputs:",
-    JSON.stringify(
-      {
-        commandAuthorized: params.commandAuthorized,
-        currentAgentId: params.currentAgentId ?? null,
-        flowContext: params.flowContext.slice(0, 3),
-        inboundBody: params.body,
-        candidateAgents: agentCatalog,
-      },
-      null,
-      2,
-    ),
+    `Command authorized: ${params.commandAuthorized ? "yes" : "no"}`,
+    `Current agent: ${params.currentAgentId ?? "none"}`,
+    `Inbound message: ${inboundBody || "(empty)"}`,
+    `Flow hints: ${flowHints.length > 0 ? flowHints.join(" || ") : "none"}`,
+    "Candidate agents:",
+    ...candidateLines,
   ].join("\n");
 }
 
-function extractTextFromCompletionContent(
-  content: Array<{ type?: string; text?: string }>,
-): string {
-  return content
-    .filter((block) => block?.type === "text" && typeof block.text === "string")
-    .map((block) => block.text?.trim() ?? "")
-    .filter(Boolean)
-    .join("\n")
-    .trim();
+function extractTextFromCompletionContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!content) {
+    return "";
+  }
+  if (Array.isArray(content)) {
+    return content
+      .flatMap((block) => {
+        if (typeof block === "string") {
+          return [block.trim()];
+        }
+        if (!block || typeof block !== "object") {
+          return [];
+        }
+        const record = block as {
+          type?: string;
+          text?: unknown;
+          content?: unknown;
+          reasoning?: unknown;
+        };
+        if (record.type === "text" && typeof record.text === "string") {
+          return [record.text.trim()];
+        }
+        if (typeof record.content === "string") {
+          return [record.content.trim()];
+        }
+        if (typeof record.reasoning === "string") {
+          return [record.reasoning.trim()];
+        }
+        return [];
+      })
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+  if (typeof content !== "object") {
+    return "";
+  }
+
+  const record = content as {
+    text?: unknown;
+    content?: unknown;
+    reasoning?: unknown;
+    message?: { content?: unknown; reasoning?: unknown };
+  };
+  if (typeof record.text === "string") {
+    return record.text.trim();
+  }
+  if (typeof record.reasoning === "string") {
+    return record.reasoning.trim();
+  }
+  if (record.content) {
+    const nestedContent = extractTextFromCompletionContent(record.content);
+    if (nestedContent) {
+      return nestedContent;
+    }
+  }
+  if (record.message?.content) {
+    const nestedMessageContent = extractTextFromCompletionContent(record.message.content);
+    if (nestedMessageContent) {
+      return nestedMessageContent;
+    }
+  }
+  if (record.message?.reasoning) {
+    const nestedReasoning = extractTextFromCompletionContent(record.message.reasoning);
+    if (nestedReasoning) {
+      return nestedReasoning;
+    }
+  }
+  return "";
 }
 
 function stripMarkdownFence(raw: string): string {
@@ -632,10 +742,11 @@ export async function runInboundOrchestrationRouter(params: {
       baseUrl?: string;
     };
     const context = {
+      systemPrompt,
       messages: [
         {
           role: "user" as const,
-          content: `${systemPrompt}\n\n${prompt}`,
+          content: prompt,
           timestamp: Date.now(),
         },
       ],
@@ -650,8 +761,9 @@ export async function runInboundOrchestrationRouter(params: {
                 apiKey,
                 temperature: 0,
                 maxTokens: routerSettings.maxTokens,
+                think: false,
                 signal: AbortSignal.timeout(routerSettings.timeoutMs),
-              },
+              } as Parameters<ReturnType<typeof createOllamaStreamFn>>[2] & { think?: boolean },
             )
           ).result()
         : await completeSimple(model, context, {
@@ -661,10 +773,12 @@ export async function runInboundOrchestrationRouter(params: {
             reasoning: "low",
             signal: AbortSignal.timeout(routerSettings.timeoutMs),
           });
-    const rawResponse = extractTextFromCompletionContent(
-      response.content as Array<{ type?: string; text?: string }>,
-    );
+    const rawResponse = extractTextFromCompletionContent(response);
     const payload = extractJsonPayload(rawResponse);
+    const usage = normalizeUsage(
+      (response as unknown as { usage?: Record<string, unknown> }).usage ??
+        (response as unknown as Record<string, unknown>),
+    );
 
     persistAsync(
       persistOrchestrationPromptOutput({
@@ -674,17 +788,18 @@ export async function runInboundOrchestrationRouter(params: {
         provider: resolved.model.provider,
         model: resolved.model.id,
         assistantTexts: rawResponse ? [rawResponse] : [],
-        lastAssistant: payload ?? rawResponse,
+        lastAssistant: payload ?? response,
         usage: {
-          input: response.usage?.input,
-          output: response.usage?.output,
-          cacheRead: response.usage?.cacheRead,
-          cacheWrite: response.usage?.cacheWrite,
+          input: usage?.input,
+          output: usage?.output,
+          cacheRead: usage?.cacheRead,
+          cacheWrite: usage?.cacheWrite,
           total:
-            (response.usage?.input ?? 0) +
-            (response.usage?.output ?? 0) +
-            (response.usage?.cacheRead ?? 0) +
-            (response.usage?.cacheWrite ?? 0),
+            usage?.total ??
+            (usage?.input ?? 0) +
+              (usage?.output ?? 0) +
+              (usage?.cacheRead ?? 0) +
+              (usage?.cacheWrite ?? 0),
         },
       }),
       "persist prompt output",
@@ -763,6 +878,18 @@ export async function runInboundOrchestrationRouter(params: {
 
     return decision;
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    const fallbackWithError = applyTrivialLocalOverride(
+      {
+        ...fallback,
+        selectedAgentReason: `router failed; ${fallback.selectedAgentReason}`,
+        reasons: uniq([`router error: ${errorMessage}`, ...fallback.reasons]),
+        provider: resolved.model.provider,
+        model: resolved.model.id,
+        rawResponse: errorMessage,
+      },
+      params.body,
+    );
     persistAsync(
       persistOrchestrationStep({
         traceId: params.traceId,
@@ -770,12 +897,13 @@ export async function runInboundOrchestrationRouter(params: {
         data: {
           provider: resolved.model.provider,
           model: resolved.model.id,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMessage,
+          fallback: fallbackWithError,
         },
       }),
       "persist router error",
     );
     logVerbose(`orchestration router: model call failed: ${String(err)}`);
-    return fallback;
+    return fallbackWithError;
   }
 }

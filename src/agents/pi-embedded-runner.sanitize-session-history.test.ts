@@ -133,7 +133,73 @@ describe("sanitizeSessionHistory", () => {
     expect(first.content as string).toContain("sourceSession=agent:main:req");
   });
 
-  it("keeps reasoning-only assistant messages for openai-responses", async () => {
+  it("normalizes history to conversational user and assistant text only", async () => {
+    vi.mocked(helpers.isGoogleModelApi).mockReturnValue(false);
+
+    const messages: AgentMessage[] = [
+      {
+        role: "user",
+        content:
+          "<persistent_memory>\nold memory\n</persistent_memory>\n\n" +
+          'Conversation info (untrusted metadata):\n```json\n{"message_id":"1"}\n```\n\n' +
+          "hi again",
+      } as AgentMessage,
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hello back" }],
+        provider: "ollama",
+        model: "gemma4:e4b",
+        usage: { input: 10, output: 2 },
+        timestamp: Date.now(),
+      } as unknown as AgentMessage,
+      {
+        role: "toolResult",
+        toolName: "vault_search",
+        content: [{ type: "text", text: "ignored tool detail" }],
+      } as unknown as AgentMessage,
+    ];
+
+    const result = await sanitizeSessionHistory({
+      messages,
+      modelApi: "openai-responses",
+      provider: "openai",
+      sessionManager: mockSessionManager,
+      sessionId: TEST_SESSION_ID,
+    });
+
+    expect(result).toEqual([
+      {
+        role: "user",
+        content: "hi again",
+        timestamp: expect.any(Number),
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "hello back" }],
+        api: "openai-responses",
+        provider: "ollama",
+        model: "gemma4:e4b",
+        usage: {
+          input: 10,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 12,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "stop",
+        timestamp: expect.any(Number),
+      },
+    ]);
+  });
+
+  it("drops reasoning-only assistant messages from conversational history", async () => {
     vi.mocked(helpers.isGoogleModelApi).mockReturnValue(false);
 
     const messages = [
@@ -159,11 +225,16 @@ describe("sanitizeSessionHistory", () => {
       sessionId: TEST_SESSION_ID,
     });
 
-    expect(result).toHaveLength(2);
-    expect(result[1]?.role).toBe("assistant");
+    expect(result).toEqual([
+      {
+        role: "user",
+        content: "hello",
+        timestamp: expect.any(Number),
+      },
+    ]);
   });
 
-  it("does not synthesize tool results for openai-responses", async () => {
+  it("drops tool-only assistant history for openai-responses", async () => {
     const messages = [
       {
         role: "assistant",
@@ -179,8 +250,7 @@ describe("sanitizeSessionHistory", () => {
       sessionId: TEST_SESSION_ID,
     });
 
-    expect(result).toHaveLength(1);
-    expect(result[0]?.role).toBe("assistant");
+    expect(result).toEqual([]);
   });
 
   it("drops malformed tool calls missing input or arguments", async () => {
@@ -237,7 +307,7 @@ describe("sanitizeSessionHistory", () => {
     expect(result).toEqual([]);
   });
 
-  it("drops orphaned toolResult entries when switching from openai history to anthropic", async () => {
+  it("keeps only conversational user history when orphaned tool results are removed", async () => {
     const sessionEntries = [
       makeModelSnapshotEntry({
         provider: "openai",
@@ -275,13 +345,12 @@ describe("sanitizeSessionHistory", () => {
       sessionId: TEST_SESSION_ID,
     });
 
-    expect(result.map((msg) => msg.role)).toEqual(["assistant", "toolResult", "user"]);
-    expect(
-      result.some(
-        (msg) =>
-          msg.role === "toolResult" &&
-          (msg as { toolCallId?: string }).toolCallId === "tool_01VihkDRptyLpX1ApUPe7ooU",
-      ),
-    ).toBe(false);
+    expect(result).toEqual([
+      {
+        role: "user",
+        content: "continue",
+        timestamp: expect.any(Number),
+      },
+    ]);
   });
 });

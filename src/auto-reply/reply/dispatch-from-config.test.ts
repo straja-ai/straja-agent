@@ -578,6 +578,41 @@ describe("dispatchReplyFromConfig", () => {
     expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
   });
 
+  it("primes instant typing before orchestration runs", async () => {
+    setNoAbort();
+    const onReplyStart = vi.fn(async () => {});
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "telegram",
+      ChatType: "direct",
+      Body: "hi",
+      Surface: "telegram",
+    });
+
+    const replyResolver = async () => ({ text: "hello" }) satisfies ReplyPayload;
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyResolver,
+      replyOptions: {
+        onReplyStart,
+      },
+    });
+
+    expect(onReplyStart).toHaveBeenCalledTimes(1);
+  });
+
   it("sends tool results via dispatcher in DM sessions", async () => {
     setNoAbort();
     const cfg = emptyConfig;

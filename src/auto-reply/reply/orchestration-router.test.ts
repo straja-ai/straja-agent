@@ -165,4 +165,199 @@ describe("orchestration-router", () => {
     expect(decision.selectedAgentId).toBe("main");
     expect(decision.selectedAgentReason).toContain("invalid agent id");
   });
+
+  it("captures router output from ollama assistant-message shaped responses", async () => {
+    mocks.completeSimple.mockResolvedValue({
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            selectedAgentId: "main",
+            taskClass: "general_agent_turn",
+            suggestedRoute: "default_specialist",
+            confidence: 0.88,
+            toolFamily: "general",
+            memoryQuery: "hi again",
+            vaultQuery: "hi again",
+            reasons: ["general request"],
+          }),
+        },
+      ],
+      usage: { input: 101, output: 17, total: 118 },
+      stopReason: "end_turn",
+    });
+
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            router: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+        list: [{ id: "main", default: true, name: "General Assistant" }],
+      },
+    } as OpenClawConfig;
+
+    await runInboundOrchestrationRouter({
+      cfg,
+      traceId: "trace-router-3",
+      sessionId: "telegram:1",
+      body: "hi again",
+      currentAgentId: "main",
+      commandAuthorized: true,
+      flowContext: [],
+    });
+
+    expect(mocks.persistPromptOutput).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assistantTexts: [expect.stringContaining('"selectedAgentId":"main"')],
+        usage: expect.objectContaining({
+          input: 101,
+          output: 17,
+          total: 118,
+        }),
+      }),
+    );
+  });
+
+  it("builds a compact router prompt instead of serializing full routing payloads", async () => {
+    mocks.completeSimple.mockResolvedValue({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            selectedAgentId: "software-engineer",
+            taskClass: "complex_turn",
+            suggestedRoute: "default_specialist",
+            confidence: 0.74,
+            toolFamily: "coding",
+            memoryQuery: "fix build failure",
+            vaultQuery: "build failure",
+            reasons: ["engineering specialist matches"],
+          }),
+        },
+      ],
+      usage: { input: 99, output: 21, total: 120 },
+    });
+
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            router: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+        list: [
+          {
+            id: "chief-of-staff",
+            default: true,
+            name: "Chief of Staff",
+          },
+          {
+            id: "software-engineer",
+            name: "Software Engineer",
+          },
+        ],
+      },
+    } as OpenClawConfig;
+
+    await runInboundOrchestrationRouter({
+      cfg,
+      traceId: "trace-router-4",
+      sessionId: "telegram:1",
+      body: "Please fix the build failure in the repository and explain the root cause. ".repeat(
+        12,
+      ),
+      currentAgentId: "chief-of-staff",
+      commandAuthorized: true,
+      flowContext: [
+        "This flow was created from a long parent thread and includes a lot of accumulated operational context that the router should not fully inline.",
+      ],
+    });
+
+    const promptInputCall = mocks.persistPromptInput.mock.calls.at(-1)?.[0];
+    expect(promptInputCall?.prompt).toContain("Candidate agents:");
+    expect(promptInputCall?.prompt).toContain("Inbound message:");
+    expect(promptInputCall?.prompt).not.toContain('"candidateAgents"');
+    expect(promptInputCall?.prompt).not.toContain('"inboundBody"');
+    expect(promptInputCall?.prompt?.length ?? 0).toBeLessThan(2500);
+  });
+
+  it("sends router system and user prompts separately for non-ollama models", async () => {
+    mocks.resolveModel.mockReturnValue({
+      model: {
+        provider: "openai",
+        id: "gpt-5.4",
+      },
+      authStorage: {},
+      modelRegistry: {},
+    });
+    mocks.getApiKeyForModel.mockResolvedValue({
+      apiKey: "test-key",
+      source: "env: OPENAI_API_KEY",
+      mode: "api-key",
+    });
+    mocks.completeSimple.mockResolvedValue({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            selectedAgentId: "main",
+            taskClass: "general_agent_turn",
+            suggestedRoute: "default_specialist",
+            confidence: 0.71,
+            toolFamily: "general",
+            memoryQuery: "hello",
+            vaultQuery: "hello",
+            reasons: ["general request"],
+          }),
+        },
+      ],
+      usage: { input: 40, output: 10, total: 50 },
+    });
+
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            router: {
+              model: "openai/gpt-5.4",
+            },
+          },
+        },
+        list: [{ id: "main", default: true, name: "General Assistant" }],
+      },
+    } as OpenClawConfig;
+
+    await runInboundOrchestrationRouter({
+      cfg,
+      traceId: "trace-router-5",
+      sessionId: "telegram:1",
+      body: "hello",
+      currentAgentId: "main",
+      commandAuthorized: true,
+      flowContext: [],
+    });
+
+    const call = mocks.completeSimple.mock.calls.at(-1);
+    expect(call?.[1]).toEqual(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("You are the orchestration router for Straja."),
+        messages: [
+          expect.objectContaining({
+            role: "user",
+            content: expect.stringContaining("Inbound message: hello"),
+          }),
+        ],
+      }),
+    );
+    expect(
+      (call?.[1] as { messages?: Array<{ content?: string }> })?.messages?.[0]?.content,
+    ).not.toContain("You are the orchestration router for Straja.");
+  });
 });

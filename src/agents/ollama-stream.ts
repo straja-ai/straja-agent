@@ -37,6 +37,7 @@ interface OllamaChatRequest {
   model: string;
   messages: OllamaChatMessage[];
   stream: boolean;
+  think?: boolean | string;
   tools?: OllamaTool[];
   options?: Record<string, unknown>;
 }
@@ -365,6 +366,10 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
           model: model.id,
           messages: ollamaMessages,
           stream: true,
+          ...("think" in (options ?? {}) &&
+          (options as { think?: boolean | string }).think !== undefined
+            ? { think: (options as { think?: boolean | string }).think }
+            : {}),
           ...(ollamaTools.length > 0 ? { tools: ollamaTools } : {}),
           options: ollamaOptions,
         };

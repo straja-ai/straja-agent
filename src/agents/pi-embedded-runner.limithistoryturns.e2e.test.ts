@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { describe, expect, it } from "vitest";
-import { limitHistoryTurns } from "./pi-embedded-runner.js";
+import { limitHistoryTurns, resolveEffectiveHistoryTurnLimit } from "./pi-embedded-runner.js";
 
 describe("limitHistoryTurns", () => {
   const mockUsage = {
@@ -123,5 +123,17 @@ describe("limitHistoryTurns", () => {
     const limited = limitHistoryTurns(messages, 1);
     expect(firstText(limited[0])).toBe("second");
     expect(firstText(limited[1])).toBe("response");
+  });
+
+  it("caps local worker history to two user turns", () => {
+    expect(resolveEffectiveHistoryTurnLimit({ limit: 4, promptModeOverride: "local_worker" })).toBe(
+      2,
+    );
+    expect(
+      resolveEffectiveHistoryTurnLimit({ limit: undefined, promptModeOverride: "local_worker" }),
+    ).toBe(2);
+    expect(resolveEffectiveHistoryTurnLimit({ limit: 1, promptModeOverride: "local_worker" })).toBe(
+      1,
+    );
   });
 });

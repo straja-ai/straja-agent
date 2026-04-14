@@ -52,6 +52,10 @@ const GOOGLE_SCHEMA_UNSUPPORTED_KEYWORDS = new Set([
 ]);
 const ANTIGRAVITY_SIGNATURE_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const INTER_SESSION_PREFIX_BASE = "[Inter-session message]";
+const PERSISTENT_MEMORY_BLOCK_RE = /<persistent_memory>[\s\S]*?<\/persistent_memory>\s*/gi;
+const CONVERSATION_INFO_BLOCK_RE =
+  /Conversation info \(untrusted metadata\):\s*```(?:json)?[\s\S]*?```\s*/gi;
+const HOOK_STATUS_LINE_RE = /^System:\s*\[[^\]]+\]\s*Hook [^\n]+(?:\n+|$)/gim;
 
 function isValidAntigravitySignature(value: unknown): value is string {
   if (typeof value !== "string") {
@@ -210,6 +214,136 @@ function annotateInterSessionUserMessages(messages: AgentMessage[]): AgentMessag
     } as AgentMessage);
   }
   return touched ? out : messages;
+}
+
+function extractPlainTextContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const textParts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const typedBlock = block as { type?: unknown; text?: unknown };
+    if (typedBlock.type === "text" && typeof typedBlock.text === "string") {
+      textParts.push(typedBlock.text);
+    }
+  }
+  return textParts.join("\n\n");
+}
+
+function stripSyntheticUserWrappers(text: string): string {
+  return text
+    .replace(PERSISTENT_MEMORY_BLOCK_RE, "")
+    .replace(CONVERSATION_INFO_BLOCK_RE, "")
+    .replace(HOOK_STATUS_LINE_RE, "")
+    .trim();
+}
+
+function normalizeAssistantUsage(message: AgentMessage): {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+} {
+  const usage = (message as { usage?: Record<string, unknown> }).usage;
+  const input = typeof usage?.input === "number" ? usage.input : 0;
+  const output = typeof usage?.output === "number" ? usage.output : 0;
+  const cacheRead = typeof usage?.cacheRead === "number" ? usage.cacheRead : 0;
+  const cacheWrite = typeof usage?.cacheWrite === "number" ? usage.cacheWrite : 0;
+  const totalTokens =
+    typeof usage?.totalTokens === "number"
+      ? usage.totalTokens
+      : input + output + cacheRead + cacheWrite;
+  const rawCost =
+    usage?.cost && typeof usage.cost === "object"
+      ? (usage.cost as Record<string, unknown>)
+      : undefined;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+    cost: {
+      input: typeof rawCost?.input === "number" ? rawCost.input : 0,
+      output: typeof rawCost?.output === "number" ? rawCost.output : 0,
+      cacheRead: typeof rawCost?.cacheRead === "number" ? rawCost.cacheRead : 0,
+      cacheWrite: typeof rawCost?.cacheWrite === "number" ? rawCost.cacheWrite : 0,
+      total: typeof rawCost?.total === "number" ? rawCost.total : 0,
+    },
+  };
+}
+
+function normalizeConversationHistory(messages: AgentMessage[]): AgentMessage[] {
+  const normalized: AgentMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") {
+      continue;
+    }
+    if (msg.role !== "user" && msg.role !== "assistant") {
+      continue;
+    }
+    const content = extractPlainTextContent((msg as { content?: unknown }).content);
+    const text = msg.role === "user" ? stripSyntheticUserWrappers(content) : content.trim();
+    if (!text) {
+      continue;
+    }
+    if (msg.role === "user") {
+      normalized.push({
+        role: "user",
+        content: text,
+        timestamp:
+          typeof (msg as { timestamp?: unknown }).timestamp === "number"
+            ? (msg as { timestamp: number }).timestamp
+            : Date.now(),
+      } as AgentMessage);
+      continue;
+    }
+    normalized.push({
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api:
+        typeof (msg as { api?: unknown }).api === "string"
+          ? (msg as { api: string }).api
+          : "openai-responses",
+      provider:
+        typeof (msg as { provider?: unknown }).provider === "string"
+          ? (msg as { provider: string }).provider
+          : "openclaw",
+      model:
+        typeof (msg as { model?: unknown }).model === "string"
+          ? (msg as { model: string }).model
+          : "sanitized-history",
+      usage: normalizeAssistantUsage(msg),
+      stopReason:
+        typeof (msg as { stopReason?: unknown }).stopReason === "string"
+          ? ((msg as { stopReason: string }).stopReason as
+              | "stop"
+              | "length"
+              | "toolUse"
+              | "error"
+              | "aborted")
+          : "stop",
+      timestamp:
+        typeof (msg as { timestamp?: unknown }).timestamp === "number"
+          ? (msg as { timestamp: number }).timestamp
+          : Date.now(),
+    } as AgentMessage);
+  }
+  return normalized;
 }
 
 function findUnsupportedSchemaKeywords(schema: unknown, path: string): string[] {
@@ -474,6 +608,7 @@ export async function sanitizeSessionHistory(params: {
   const sanitizedOpenAI = isOpenAIResponsesApi
     ? downgradeOpenAIReasoningBlocks(sanitizedToolResults)
     : sanitizedToolResults;
+  const normalizedConversation = normalizeConversationHistory(sanitizedOpenAI);
 
   if (hasSnapshot && (!priorSnapshot || modelChanged)) {
     appendModelSnapshot(params.sessionManager, {
@@ -485,11 +620,11 @@ export async function sanitizeSessionHistory(params: {
   }
 
   if (!policy.applyGoogleTurnOrdering) {
-    return sanitizedOpenAI;
+    return normalizedConversation;
   }
 
   return applyGoogleTurnOrderingFix({
-    messages: sanitizedOpenAI,
+    messages: normalizedConversation,
     modelApi: params.modelApi,
     sessionManager: params.sessionManager,
     sessionId: params.sessionId,

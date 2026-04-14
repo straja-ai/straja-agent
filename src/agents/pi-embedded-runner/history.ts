@@ -35,6 +35,19 @@ export function limitHistoryTurns(
   return messages;
 }
 
+export function resolveEffectiveHistoryTurnLimit(params: {
+  limit: number | undefined;
+  promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
+}): number | undefined {
+  if (params.promptModeOverride !== "local_worker") {
+    return params.limit;
+  }
+  if (!params.limit || params.limit <= 0) {
+    return 2;
+  }
+  return Math.min(params.limit, 2);
+}
+
 /**
  * Extract provider + user ID from a session key and look up dmHistoryLimit.
  * Supports per-DM overrides and provider defaults.

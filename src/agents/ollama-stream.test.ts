@@ -20,36 +20,34 @@ describe("createOllamaStreamFn", () => {
   });
 
   it("emits incremental text events before the final done message", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        return new Response(
-          encodeLines([
-            `${JSON.stringify({
-              model: "gemma4:e4b",
-              created_at: "2026-04-09T00:00:00Z",
-              message: { role: "assistant", content: "He" },
-              done: false,
-            })}\n`,
-            `${JSON.stringify({
-              model: "gemma4:e4b",
-              created_at: "2026-04-09T00:00:01Z",
-              message: { role: "assistant", content: "llo" },
-              done: false,
-            })}\n`,
-            `${JSON.stringify({
-              model: "gemma4:e4b",
-              created_at: "2026-04-09T00:00:02Z",
-              message: { role: "assistant", content: "" },
-              done: true,
-              prompt_eval_count: 12,
-              eval_count: 3,
-            })}\n`,
-          ]),
-          { status: 200 },
-        );
-      }),
-    );
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        encodeLines([
+          `${JSON.stringify({
+            model: "gemma4:e4b",
+            created_at: "2026-04-09T00:00:00Z",
+            message: { role: "assistant", content: "He" },
+            done: false,
+          })}\n`,
+          `${JSON.stringify({
+            model: "gemma4:e4b",
+            created_at: "2026-04-09T00:00:01Z",
+            message: { role: "assistant", content: "llo" },
+            done: false,
+          })}\n`,
+          `${JSON.stringify({
+            model: "gemma4:e4b",
+            created_at: "2026-04-09T00:00:02Z",
+            message: { role: "assistant", content: "" },
+            done: true,
+            prompt_eval_count: 12,
+            eval_count: 3,
+          })}\n`,
+        ]),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const stream = createOllamaStreamFn("http://127.0.0.1:11435")(
       {
@@ -62,7 +60,7 @@ describe("createOllamaStreamFn", () => {
         systemPrompt: "You are helpful.",
         messages: [],
       },
-      {},
+      { think: false },
     );
 
     const events: Array<{ type: string; delta?: string }> = [];
@@ -87,5 +85,13 @@ describe("createOllamaStreamFn", () => {
     const finalMessage = await stream.result();
     expect(finalMessage.content).toEqual([{ type: "text", text: "Hello" }]);
     expect(finalMessage.model).toBe("gemma4:e4b");
+    const fetchInit = fetchMock.mock.calls[0]?.[1] as { body?: string } | undefined;
+    const requestBody = fetchInit?.body ? JSON.parse(fetchInit.body) : null;
+    expect(requestBody).toEqual(
+      expect.objectContaining({
+        think: false,
+        messages: [expect.objectContaining({ role: "system", content: "You are helpful." })],
+      }),
+    );
   });
 });

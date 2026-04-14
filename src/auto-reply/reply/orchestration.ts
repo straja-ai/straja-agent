@@ -200,12 +200,13 @@ function isBareSessionResetCommand(ctx: FinalizedMsgContext): boolean {
 function resolveLocalFastPathSettings(cfg: OpenClawConfig) {
   const orchestration = cfg.agents?.defaults?.orchestration;
   const localFastPath = orchestration?.localFastPath;
+  const orchestrationEnabled = orchestration?.enabled === true;
   return {
-    orchestrationEnabled: orchestration?.enabled !== false,
-    enabled: localFastPath?.enabled !== false,
+    orchestrationEnabled,
+    enabled: orchestrationEnabled,
     model: localFastPath?.model?.trim() || undefined,
     maxInputChars: localFastPath?.maxInputChars ?? DEFAULT_MAX_INPUT_CHARS,
-    requireFlowContext: localFastPath?.requireFlowContext !== false,
+    requireFlowContext: false,
     allowMedia: localFastPath?.allowMedia === true,
     promptMode: localFastPath?.promptMode ?? "local_worker",
   };

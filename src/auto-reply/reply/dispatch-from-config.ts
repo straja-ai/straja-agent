@@ -29,9 +29,11 @@ import {
   isInboundOrchestrationEnabled,
   traceInboundOrchestration,
   type InboundOrchestrationDecision,
+  type InboundOrchestrationResult,
 } from "./orchestration.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
+import { resolveTypingMode } from "./typing-mode.js";
 
 const AUDIO_PLACEHOLDER_RE = /^<media:audio>(\s*\([^)]*\))?$/i;
 const AUDIO_HEADER_RE = /^\[Audio\b/i;
@@ -319,6 +321,15 @@ export async function dispatchReplyFromConfig(params: {
       ],
     });
   }
+  const typingModeForDispatch = resolveTypingMode({
+    configured: cfg.session?.typingMode ?? cfg.agents?.defaults?.typingMode,
+    isGroupChat: dispatchCtx.ChatType === "group",
+    wasMentioned: dispatchCtx.WasMentioned === true,
+    isHeartbeat: params.replyOptions?.isHeartbeat === true,
+  });
+  if (orchestrationEnabled && typingModeForDispatch === "instant") {
+    await params.replyOptions?.onReplyStart?.();
+  }
   const sessionAgentIdForPacket = resolveSessionAgentId({
     sessionKey: dispatchCtx.SessionKey,
     config: cfg,
@@ -327,7 +338,7 @@ export async function dispatchReplyFromConfig(params: {
     cfg,
     agentId: sessionAgentIdForPacket,
   });
-  const orchestrationResult = orchestrationEnabled
+  const orchestrationResult: InboundOrchestrationResult | null = orchestrationEnabled
     ? await evaluateInboundOrchestration({
         ctx: dispatchCtx,
         cfg,
@@ -373,7 +384,9 @@ export async function dispatchReplyFromConfig(params: {
             model: directModelRef.model,
             rawResponse: "routing-disabled",
           },
-          replyOptions: {},
+          replyOptions: {
+            extraSystemPrompt: "",
+          },
         }
       : null;
   const shouldUsePacketizedContext = orchestrationResult
