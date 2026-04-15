@@ -1,4 +1,7 @@
-import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
+import {
+  resolveAgentModelFallbacksOverride,
+  resolveAgentModelPolicy,
+} from "../../agents/agent-scope.js";
 import type { NormalizedUsage } from "../../agents/usage.js";
 import { getChannelDock } from "../../channels/dock.js";
 import type { ChannelId, ChannelThreadingToolContext } from "../../channels/plugins/types.js";
@@ -137,16 +140,25 @@ export const appendUsageLine = (payloads: ReplyPayload[], line: string): ReplyPa
 export const resolveEnforceFinalTag = (run: FollowupRun["run"], provider: string) =>
   Boolean(run.enforceFinalTag || isReasoningTagProvider(provider));
 
+function isLocalProvider(provider: string): boolean {
+  const normalized = String(provider ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "ollama" || normalized === "vllm";
+}
+
 export function resolveModelFallbackOptions(run: FollowupRun["run"]) {
+  const agentId = resolveAgentIdFromSessionKey(run.sessionKey);
+  const policyOverride = resolveAgentModelPolicy(run.config, agentId);
+  const normalizedPolicyOverride =
+    policyOverride === "local_only" && !isLocalProvider(run.provider) ? "hybrid" : policyOverride;
   return {
     cfg: run.config,
     provider: run.provider,
     model: run.model,
     agentDir: run.agentDir,
-    fallbacksOverride: resolveAgentModelFallbacksOverride(
-      run.config,
-      resolveAgentIdFromSessionKey(run.sessionKey),
-    ),
+    fallbacksOverride: resolveAgentModelFallbacksOverride(run.config, agentId),
+    policyOverride: normalizedPolicyOverride,
   };
 }
 
@@ -163,6 +175,7 @@ export function buildEmbeddedRunBaseParams(params: {
     agentDir: params.run.agentDir,
     config: params.run.config,
     skillsSnapshot: params.run.skillsSnapshot,
+    toolAllowlistOverride: params.run.toolAllowlistOverride,
     ownerNumbers: params.run.ownerNumbers,
     senderIsOwner: params.run.senderIsOwner,
     enforceFinalTag: resolveEnforceFinalTag(params.run, params.provider),
@@ -176,6 +189,9 @@ export function buildEmbeddedRunBaseParams(params: {
     bashElevated: params.run.bashElevated,
     timeoutMs: params.run.timeoutMs,
     runId: params.runId,
+    promptModeOverride: params.run.promptModeOverride,
+    orchestrationTraceId: params.run.orchestrationTraceId,
+    historyLimitOverride: params.run.historyLimitOverride,
   };
 }
 

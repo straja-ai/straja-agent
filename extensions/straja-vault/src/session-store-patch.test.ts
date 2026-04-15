@@ -57,4 +57,23 @@ describe("session-store patch", () => {
 
     expect(ops.loadSessionStore("/tmp/openclaw-session-store.json")).toEqual({});
   });
+
+  it("falls back to an empty store on transient timeout when no cache exists", () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw new Error("Vault session-store GET failed: request timed out");
+    });
+
+    registerSessionStorePatch("http://localhost:8181");
+    const g = globalThis as Record<symbol, unknown>;
+    const factory = g[SESSION_STORE_PATCH_KEY] as
+      | (() => {
+          loadSessionStore: (storePath: string) => Record<string, unknown>;
+        })
+      | undefined;
+
+    expect(factory).toBeTypeOf("function");
+    const ops = factory!();
+
+    expect(ops.loadSessionStore("/tmp/openclaw-session-store.json")).toEqual({});
+  });
 });

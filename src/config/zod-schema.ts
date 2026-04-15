@@ -164,6 +164,15 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        orchestrationTrace: z
+          .object({
+            enabled: z.boolean().optional(),
+            filePath: z.string().optional(),
+            includeContext: z.boolean().optional(),
+            includePolicyChecks: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

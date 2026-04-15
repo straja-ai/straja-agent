@@ -7,10 +7,14 @@ import {
   resolveBootstrapTotalMaxChars,
 } from "./pi-embedded-helpers.js";
 import {
+  filterBootstrapFilesForLocalModel,
   filterBootstrapFilesForSession,
   loadWorkspaceBootstrapFiles,
   type WorkspaceBootstrapFile,
 } from "./workspace.js";
+
+const COMPACT_LOCAL_BOOTSTRAP_MAX_CHARS = 3_500;
+const COMPACT_LOCAL_BOOTSTRAP_TOTAL_MAX_CHARS = 12_000;
 
 export function makeBootstrapWarn(params: {
   sessionLabel: string;
@@ -28,12 +32,16 @@ export async function resolveBootstrapFilesForRun(params: {
   sessionKey?: string;
   sessionId?: string;
   agentId?: string;
+  compactLocal?: boolean;
 }): Promise<WorkspaceBootstrapFile[]> {
   const sessionKey = params.sessionKey ?? params.sessionId;
-  const bootstrapFiles = filterBootstrapFilesForSession(
+  let bootstrapFiles = filterBootstrapFilesForSession(
     await loadWorkspaceBootstrapFiles(params.workspaceDir),
     sessionKey,
   );
+  if (params.compactLocal) {
+    bootstrapFiles = filterBootstrapFilesForLocalModel(bootstrapFiles);
+  }
 
   return applyBootstrapHookOverrides({
     files: bootstrapFiles,
@@ -52,14 +60,24 @@ export async function resolveBootstrapContextForRun(params: {
   sessionId?: string;
   agentId?: string;
   warn?: (message: string) => void;
+  compactLocal?: boolean;
 }): Promise<{
   bootstrapFiles: WorkspaceBootstrapFile[];
   contextFiles: EmbeddedContextFile[];
 }> {
   const bootstrapFiles = await resolveBootstrapFilesForRun(params);
+  const maxChars = params.compactLocal
+    ? Math.min(resolveBootstrapMaxChars(params.config), COMPACT_LOCAL_BOOTSTRAP_MAX_CHARS)
+    : resolveBootstrapMaxChars(params.config);
+  const totalMaxChars = params.compactLocal
+    ? Math.min(
+        resolveBootstrapTotalMaxChars(params.config),
+        COMPACT_LOCAL_BOOTSTRAP_TOTAL_MAX_CHARS,
+      )
+    : resolveBootstrapTotalMaxChars(params.config);
   const contextFiles = buildBootstrapContextFiles(bootstrapFiles, {
-    maxChars: resolveBootstrapMaxChars(params.config),
-    totalMaxChars: resolveBootstrapTotalMaxChars(params.config),
+    maxChars,
+    totalMaxChars,
     warn: params.warn,
   });
   return { bootstrapFiles, contextFiles };

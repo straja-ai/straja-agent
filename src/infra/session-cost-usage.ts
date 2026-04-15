@@ -1,6 +1,6 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import type { NormalizedUsage, UsageLike } from "../agents/usage.js";
 import { normalizeUsage } from "../agents/usage.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -11,6 +11,7 @@ import {
 import type { SessionEntry } from "../config/sessions/types.js";
 import { countToolResults, extractToolCallNames } from "../utils/transcript-tools.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../utils/usage-format.js";
+import { appendVaultAuthCurlArgs } from "../vault-auth.js";
 import type {
   CostBreakdown,
   CostUsageTotals,
@@ -50,6 +51,9 @@ export type {
   SessionUsageTimePoint,
   SessionUsageTimeSeries,
 } from "./session-cost-usage.types.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+const VAULT_COLLECTION = "_sessions";
 
 const emptyTotals = (): CostUsageTotals => ({
   input: 0,
@@ -212,37 +216,168 @@ const applyCostTotal = (totals: CostUsageTotals, costTotal: number | undefined) 
   totals.totalCost += costTotal;
 };
 
-async function* readJsonlRecords(filePath: string): AsyncGenerator<Record<string, unknown>> {
-  const fileStream = fs.createReadStream(filePath, { encoding: "utf-8" });
-  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+function normalizeVaultBaseUrl(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
   try {
-    for await (const line of rl) {
-      const trimmed = line.trim();
-      if (!trimmed) {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function getVaultBaseUrl(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  return normalizeVaultBaseUrl(g[VAULT_READER_KEY]);
+}
+
+export function isVaultSessionStorageConfigured(): boolean {
+  return Boolean(getVaultBaseUrl());
+}
+
+function sessionPathToVaultKey(filePath: string): string {
+  return path.basename(filePath);
+}
+
+type VaultSessionFileEntry = {
+  path: string;
+  modifiedAtMs: number;
+};
+
+async function listVaultSessionFiles(): Promise<VaultSessionFileEntry[]> {
+  const baseUrl = getVaultBaseUrl();
+  if (!baseUrl) {
+    return [];
+  }
+  const url = `${baseUrl}/collections/${VAULT_COLLECTION}/files`;
+  try {
+    const result = execFileSync(
+      "curl",
+      appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]),
+      {
+        encoding: "utf-8",
+        timeout: 10_000,
+        maxBuffer: 20 * 1024 * 1024,
+      },
+    );
+    const lines = result.trimEnd().split("\n");
+    const statusLine = lines.pop() || "0";
+    const status = Number.parseInt(statusLine, 10);
+    if (status !== 200) {
+      return [];
+    }
+    const body = lines.join("\n");
+    const parsed = JSON.parse(body) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => {
+        const row = entry as Record<string, unknown>;
+        const filePath = typeof row.path === "string" ? row.path : undefined;
+        const modifiedAtRaw = typeof row.modifiedAt === "string" ? row.modifiedAt : undefined;
+        if (!filePath || !filePath.endsWith(".jsonl") || !modifiedAtRaw) {
+          return null;
+        }
+        const modifiedAtMs = Date.parse(modifiedAtRaw);
+        if (!Number.isFinite(modifiedAtMs)) {
+          return null;
+        }
+        return { path: filePath, modifiedAtMs };
+      })
+      .filter((entry): entry is VaultSessionFileEntry => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+async function vaultGetTranscript(vaultKey: string): Promise<string | null> {
+  const baseUrl = getVaultBaseUrl();
+  if (!baseUrl) {
+    return null;
+  }
+  const url = `${baseUrl}/raw/${VAULT_COLLECTION}/${encodeURIComponent(vaultKey)}`;
+  try {
+    const result = execFileSync(
+      "curl",
+      appendVaultAuthCurlArgs(["-s", "-w", "\n%{http_code}", "-X", "GET", url]),
+      {
+        encoding: "utf-8",
+        timeout: 10_000,
+        maxBuffer: 50 * 1024 * 1024,
+      },
+    );
+    const lines = result.trimEnd().split("\n");
+    const statusLine = lines.pop() || "0";
+    const status = Number.parseInt(statusLine, 10);
+    if (status !== 200) {
+      return null;
+    }
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
+
+async function readTranscriptText(params: {
+  filePath?: string;
+  vaultKey?: string;
+}): Promise<string | null> {
+  if (params.filePath && fs.existsSync(params.filePath)) {
+    return await fs.promises.readFile(params.filePath, "utf-8").catch(() => null);
+  }
+  const vaultKey =
+    params.vaultKey ?? (params.filePath ? sessionPathToVaultKey(params.filePath) : undefined);
+  if (!vaultKey) {
+    return null;
+  }
+  return await vaultGetTranscript(vaultKey);
+}
+
+function* parseJsonlRecords(content: string): Generator<Record<string, unknown>> {
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (!parsed || typeof parsed !== "object") {
         continue;
       }
-      try {
-        const parsed = JSON.parse(trimmed) as unknown;
-        if (!parsed || typeof parsed !== "object") {
-          continue;
-        }
-        yield parsed as Record<string, unknown>;
-      } catch {
-        // Ignore malformed lines
-      }
+      yield parsed as Record<string, unknown>;
+    } catch {
+      // Ignore malformed lines
     }
-  } finally {
-    rl.close();
-    fileStream.destroy();
   }
 }
 
 async function scanTranscriptFile(params: {
-  filePath: string;
+  filePath?: string;
+  vaultKey?: string;
   config?: OpenClawConfig;
   onEntry: (entry: ParsedTranscriptEntry) => void;
-}): Promise<void> {
-  for await (const parsed of readJsonlRecords(params.filePath)) {
+}): Promise<boolean> {
+  const content = await readTranscriptText({
+    filePath: params.filePath,
+    vaultKey: params.vaultKey,
+  });
+  if (!content) {
+    return false;
+  }
+  for (const parsed of parseJsonlRecords(content)) {
     const entry = parseTranscriptEntry(parsed);
     if (!entry) {
       continue;
@@ -259,15 +394,18 @@ async function scanTranscriptFile(params: {
 
     params.onEntry(entry);
   }
+  return true;
 }
 
 async function scanUsageFile(params: {
-  filePath: string;
+  filePath?: string;
+  vaultKey?: string;
   config?: OpenClawConfig;
   onEntry: (entry: ParsedUsageEntry) => void;
-}): Promise<void> {
-  await scanTranscriptFile({
+}): Promise<boolean> {
+  return await scanTranscriptFile({
     filePath: params.filePath,
+    vaultKey: params.vaultKey,
     config: params.config,
     onEntry: (entry) => {
       if (!entry.usage) {
@@ -310,55 +448,68 @@ export async function loadCostUsageSummary(params?: {
 
   const dailyMap = new Map<string, CostUsageTotals>();
   const totals = emptyTotals();
+  const scanEntry = (entry: ParsedUsageEntry) => {
+    const ts = entry.timestamp?.getTime();
+    if (!ts || ts < sinceTime || ts > untilTime) {
+      return;
+    }
+    const dayKey = formatDayKey(entry.timestamp ?? now);
+    const bucket = dailyMap.get(dayKey) ?? emptyTotals();
+    applyUsageTotals(bucket, entry.usage);
+    if (entry.costBreakdown?.total !== undefined) {
+      applyCostBreakdown(bucket, entry.costBreakdown);
+    } else {
+      applyCostTotal(bucket, entry.costTotal);
+    }
+    dailyMap.set(dayKey, bucket);
 
-  const sessionsDir = resolveSessionTranscriptsDirForAgent(params?.agentId);
-  const entries = await fs.promises.readdir(sessionsDir, { withFileTypes: true }).catch(() => []);
-  const files = (
-    await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-        .map(async (entry) => {
-          const filePath = path.join(sessionsDir, entry.name);
-          const stats = await fs.promises.stat(filePath).catch(() => null);
-          if (!stats) {
-            return null;
-          }
-          // Include file if it was modified after our start time
-          if (stats.mtimeMs < sinceTime) {
-            return null;
-          }
-          return filePath;
-        }),
-    )
-  ).filter((filePath): filePath is string => Boolean(filePath));
+    applyUsageTotals(totals, entry.usage);
+    if (entry.costBreakdown?.total !== undefined) {
+      applyCostBreakdown(totals, entry.costBreakdown);
+    } else {
+      applyCostTotal(totals, entry.costTotal);
+    }
+  };
 
-  for (const filePath of files) {
-    await scanUsageFile({
-      filePath,
-      config: params?.config,
-      onEntry: (entry) => {
-        const ts = entry.timestamp?.getTime();
-        if (!ts || ts < sinceTime || ts > untilTime) {
-          return;
-        }
-        const dayKey = formatDayKey(entry.timestamp ?? now);
-        const bucket = dailyMap.get(dayKey) ?? emptyTotals();
-        applyUsageTotals(bucket, entry.usage);
-        if (entry.costBreakdown?.total !== undefined) {
-          applyCostBreakdown(bucket, entry.costBreakdown);
-        } else {
-          applyCostTotal(bucket, entry.costTotal);
-        }
-        dailyMap.set(dayKey, bucket);
+  if (isVaultSessionStorageConfigured()) {
+    const files = (await listVaultSessionFiles()).filter(
+      (entry) => entry.modifiedAtMs >= sinceTime,
+    );
+    for (const file of files) {
+      await scanUsageFile({
+        vaultKey: file.path,
+        config: params?.config,
+        onEntry: scanEntry,
+      });
+    }
+  } else {
+    const sessionsDir = resolveSessionTranscriptsDirForAgent(params?.agentId);
+    const entries = await fs.promises.readdir(sessionsDir, { withFileTypes: true }).catch(() => []);
+    const files = (
+      await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+          .map(async (entry) => {
+            const filePath = path.join(sessionsDir, entry.name);
+            const stats = await fs.promises.stat(filePath).catch(() => null);
+            if (!stats) {
+              return null;
+            }
+            if (stats.mtimeMs < sinceTime) {
+              return null;
+            }
+            return filePath;
+          }),
+      )
+    ).filter((filePath): filePath is string => Boolean(filePath));
 
-        applyUsageTotals(totals, entry.usage);
-        if (entry.costBreakdown?.total !== undefined) {
-          applyCostBreakdown(totals, entry.costBreakdown);
-        } else {
-          applyCostTotal(totals, entry.costTotal);
-        }
-      },
-    });
+    for (const filePath of files) {
+      await scanUsageFile({
+        filePath,
+        config: params?.config,
+        onEntry: scanEntry,
+      });
+    }
   }
 
   const daily = Array.from(dailyMap.entries())
@@ -385,6 +536,60 @@ export async function discoverAllSessions(params?: {
   startMs?: number;
   endMs?: number;
 }): Promise<DiscoveredSession[]> {
+  if (isVaultSessionStorageConfigured()) {
+    const files = await listVaultSessionFiles();
+    const discovered: DiscoveredSession[] = [];
+
+    for (const file of files) {
+      if (params?.startMs && file.modifiedAtMs < params.startMs) {
+        continue;
+      }
+
+      const sessionId = file.path.slice(0, -6);
+      let firstUserMessage: string | undefined;
+      const content = await readTranscriptText({ vaultKey: file.path });
+      if (content) {
+        for (const parsed of parseJsonlRecords(content)) {
+          try {
+            const message = parsed.message as Record<string, unknown> | undefined;
+            if (message?.role === "user") {
+              const rawContent = message.content;
+              if (typeof rawContent === "string") {
+                firstUserMessage = rawContent.slice(0, 100);
+              } else if (Array.isArray(rawContent)) {
+                for (const block of rawContent) {
+                  if (
+                    typeof block === "object" &&
+                    block &&
+                    (block as Record<string, unknown>).type === "text"
+                  ) {
+                    const text = (block as Record<string, unknown>).text;
+                    if (typeof text === "string") {
+                      firstUserMessage = text.slice(0, 100);
+                    }
+                    break;
+                  }
+                }
+              }
+              break;
+            }
+          } catch {
+            // Ignore malformed lines
+          }
+        }
+      }
+
+      discovered.push({
+        sessionId,
+        sessionFile: file.path,
+        mtime: file.modifiedAtMs,
+        firstUserMessage,
+      });
+    }
+
+    return discovered.toSorted((a, b) => b.mtime - a.mtime);
+  }
+
   const sessionsDir = resolveSessionTranscriptsDirForAgent(params?.agentId);
   const entries = await fs.promises.readdir(sessionsDir, { withFileTypes: true }).catch(() => []);
 
@@ -413,32 +618,35 @@ export async function discoverAllSessions(params?: {
     // Try to read first user message for label extraction
     let firstUserMessage: string | undefined;
     try {
-      for await (const parsed of readJsonlRecords(filePath)) {
-        try {
-          const message = parsed.message as Record<string, unknown> | undefined;
-          if (message?.role === "user") {
-            const content = message.content;
-            if (typeof content === "string") {
-              firstUserMessage = content.slice(0, 100);
-            } else if (Array.isArray(content)) {
-              for (const block of content) {
-                if (
-                  typeof block === "object" &&
-                  block &&
-                  (block as Record<string, unknown>).type === "text"
-                ) {
-                  const text = (block as Record<string, unknown>).text;
-                  if (typeof text === "string") {
-                    firstUserMessage = text.slice(0, 100);
+      const content = await readTranscriptText({ filePath });
+      if (content) {
+        for (const parsed of parseJsonlRecords(content)) {
+          try {
+            const message = parsed.message as Record<string, unknown> | undefined;
+            if (message?.role === "user") {
+              const content = message.content;
+              if (typeof content === "string") {
+                firstUserMessage = content.slice(0, 100);
+              } else if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (
+                    typeof block === "object" &&
+                    block &&
+                    (block as Record<string, unknown>).type === "text"
+                  ) {
+                    const text = (block as Record<string, unknown>).text;
+                    if (typeof text === "string") {
+                      firstUserMessage = text.slice(0, 100);
+                    }
+                    break;
                   }
-                  break;
                 }
               }
+              break; // Found first user message
             }
-            break; // Found first user message
+          } catch {
+            // Skip malformed lines
           }
-        } catch {
-          // Skip malformed lines
         }
       }
     } catch {
@@ -473,7 +681,7 @@ export async function loadSessionCostSummary(params: {
           agentId: params.agentId,
         })
       : undefined);
-  if (!sessionFile || !fs.existsSync(sessionFile)) {
+  if (!sessionFile) {
     return null;
   }
 
@@ -750,7 +958,7 @@ export async function loadSessionUsageTimeSeries(params: {
           agentId: params.agentId,
         })
       : undefined);
-  if (!sessionFile || !fs.existsSync(sessionFile)) {
+  if (!sessionFile) {
     return null;
   }
 
@@ -859,14 +1067,18 @@ export async function loadSessionLogs(params: {
           agentId: params.agentId,
         })
       : undefined);
-  if (!sessionFile || !fs.existsSync(sessionFile)) {
+  if (!sessionFile) {
     return null;
   }
 
   const logs: SessionLogEntry[] = [];
   const limit = params.limit ?? 50;
 
-  for await (const parsed of readJsonlRecords(sessionFile)) {
+  const content = await readTranscriptText({ filePath: sessionFile });
+  if (!content) {
+    return null;
+  }
+  for (const parsed of parseJsonlRecords(content)) {
     try {
       const message = parsed.message as Record<string, unknown> | undefined;
       if (!message) {

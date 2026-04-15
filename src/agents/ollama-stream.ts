@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import type {
   AssistantMessage,
@@ -12,12 +14,30 @@ import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 
 export const OLLAMA_NATIVE_BASE_URL = "http://127.0.0.1:11434";
 
+async function writeDebugOllamaRequest(payload: Record<string, unknown>): Promise<void> {
+  const targetPath = process.env.STRAJA_DEBUG_OLLAMA_REQUEST_PATH?.trim();
+  if (!targetPath) {
+    return;
+  }
+  try {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(`${targetPath}.tmp`, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    await fs.rename(`${targetPath}.tmp`, targetPath);
+  } catch (err) {
+    console.warn(
+      "[ollama-stream] Failed to write debug request artifact:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 // ── Ollama /api/chat request types ──────────────────────────────────────────
 
 interface OllamaChatRequest {
   model: string;
   messages: OllamaChatMessage[];
   stream: boolean;
+  think?: boolean | string;
   tools?: OllamaTool[];
   options?: Record<string, unknown>;
 }
@@ -236,6 +256,36 @@ export function buildAssistantMessage(
   };
 }
 
+function createEmptyUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function clonePartialAssistantMessage(message: AssistantMessage): AssistantMessage {
+  return {
+    ...message,
+    content: message.content.map((block) => {
+      if (block.type === "text") {
+        return { ...block };
+      }
+      if (block.type === "toolCall") {
+        return { ...block, arguments: { ...block.arguments } };
+      }
+      return { ...block };
+    }),
+    usage: {
+      ...message.usage,
+      cost: { ...message.usage.cost },
+    },
+  };
+}
+
 // ── NDJSON streaming parser ─────────────────────────────────────────────────
 
 export async function* parseNdjsonStream(
@@ -316,9 +366,23 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
           model: model.id,
           messages: ollamaMessages,
           stream: true,
+          ...("think" in (options ?? {}) &&
+          (options as { think?: boolean | string }).think !== undefined
+            ? { think: (options as { think?: boolean | string }).think }
+            : {}),
           ...(ollamaTools.length > 0 ? { tools: ollamaTools } : {}),
           options: ollamaOptions,
         };
+
+        void writeDebugOllamaRequest({
+          timestamp: new Date().toISOString(),
+          chatUrl,
+          model: model.id,
+          provider: model.provider,
+          api: model.api,
+          contextWindow: model.contextWindow ?? null,
+          body,
+        });
 
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
@@ -348,13 +412,41 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
         let accumulatedContent = "";
         const accumulatedToolCalls: OllamaToolCall[] = [];
         let finalResponse: OllamaChatResponse | undefined;
+        let textContentIndex: number | undefined;
+        const partialMessage: AssistantMessage = {
+          role: "assistant",
+          content: [],
+          stopReason: "stop",
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: createEmptyUsage(),
+          timestamp: Date.now(),
+        };
 
         for await (const chunk of parseNdjsonStream(reader)) {
-          if (chunk.message?.content) {
-            accumulatedContent += chunk.message.content;
-          } else if (chunk.message?.reasoning) {
-            // Qwen 3 reasoning mode: content may be empty, output in reasoning
-            accumulatedContent += chunk.message.reasoning;
+          const delta = chunk.message?.content || chunk.message?.reasoning || "";
+          if (delta) {
+            accumulatedContent += delta;
+            if (textContentIndex === undefined) {
+              textContentIndex = partialMessage.content.length;
+              partialMessage.content.push({ type: "text", text: "" });
+              stream.push({
+                type: "text_start",
+                contentIndex: textContentIndex,
+                partial: clonePartialAssistantMessage(partialMessage),
+              });
+            }
+            const contentBlock = partialMessage.content[textContentIndex];
+            if (contentBlock?.type === "text") {
+              contentBlock.text += delta;
+            }
+            stream.push({
+              type: "text_delta",
+              contentIndex: textContentIndex,
+              delta,
+              partial: clonePartialAssistantMessage(partialMessage),
+            });
           }
 
           // Ollama sends tool_calls in intermediate (done:false) chunks,
@@ -376,6 +468,14 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
         finalResponse.message.content = accumulatedContent;
         if (accumulatedToolCalls.length > 0) {
           finalResponse.message.tool_calls = accumulatedToolCalls;
+        }
+        if (textContentIndex !== undefined) {
+          stream.push({
+            type: "text_end",
+            contentIndex: textContentIndex,
+            content: accumulatedContent,
+            partial: clonePartialAssistantMessage(partialMessage),
+          });
         }
 
         const assistantMessage = buildAssistantMessage(finalResponse, {
@@ -405,14 +505,7 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
             api: model.api,
             provider: model.provider,
             model: model.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createEmptyUsage(),
             timestamp: Date.now(),
           },
         });

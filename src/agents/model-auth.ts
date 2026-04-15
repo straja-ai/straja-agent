@@ -24,6 +24,8 @@ const AWS_BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK";
 const AWS_ACCESS_KEY_ENV = "AWS_ACCESS_KEY_ID";
 const AWS_SECRET_KEY_ENV = "AWS_SECRET_ACCESS_KEY";
 const AWS_PROFILE_ENV = "AWS_PROFILE";
+const OLLAMA_API_KEY_ENV = "OLLAMA_API_KEY";
+const OLLAMA_LOCAL_PLACEHOLDER_API_KEY = "ollama-local";
 
 function resolveProviderConfig(
   cfg: OpenClawConfig | undefined,
@@ -208,6 +210,15 @@ export async function resolveApiKeyForProvider(params: {
   }
 
   const normalized = normalizeProviderId(provider);
+  if (normalized === "ollama") {
+    ensureLocalProviderPlaceholderEnv("ollama");
+    return {
+      apiKey: OLLAMA_LOCAL_PLACEHOLDER_API_KEY,
+      source: `env: ${OLLAMA_API_KEY_ENV}`,
+      mode: "api-key",
+    };
+  }
+
   if (authOverride === undefined && normalized === "amazon-bedrock") {
     return resolveAwsSdkAuthInfo();
   }
@@ -234,6 +245,21 @@ export async function resolveApiKeyForProvider(params: {
 
 export type EnvApiKeyResult = { apiKey: string; source: string };
 export type ModelAuthMode = "api-key" | "oauth" | "token" | "mixed" | "aws-sdk" | "unknown";
+
+export function ensureLocalProviderPlaceholderEnv(provider: string): string | null {
+  const normalized = normalizeProviderId(provider);
+  if (normalized !== "ollama") {
+    return null;
+  }
+
+  const existing = normalizeOptionalSecretInput(process.env[OLLAMA_API_KEY_ENV]);
+  if (existing) {
+    return existing;
+  }
+
+  process.env[OLLAMA_API_KEY_ENV] = OLLAMA_LOCAL_PLACEHOLDER_API_KEY;
+  return OLLAMA_LOCAL_PLACEHOLDER_API_KEY;
+}
 
 export function resolveEnvApiKey(provider: string): EnvApiKeyResult | null {
   const normalized = normalizeProviderId(provider);

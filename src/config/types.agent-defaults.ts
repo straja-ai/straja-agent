@@ -213,7 +213,7 @@ export type AgentDefaultsConfig = {
     };
     /** Heartbeat model override (provider/model). */
     model?: string;
-    /** Session key for heartbeat runs ("main" or explicit session key). */
+    /** Session key for heartbeat runs ("main" or explicit session key). When unset, heartbeats use an internal dedicated session. */
     session?: string;
     /** Delivery target ("last", "none", or a channel id). */
     target?: "last" | "none" | ChannelId;
@@ -234,6 +234,25 @@ export type AgentDefaultsConfig = {
      * Default: false (only the final heartbeat payload is delivered).
      */
     includeReasoning?: boolean;
+  };
+  orchestration?: {
+    enabled?: boolean;
+    router?: {
+      enabled?: boolean;
+      /** Hidden local router model used for agent/tool/context selection. */
+      model?: string;
+      timeoutMs?: number;
+      maxTokens?: number;
+    };
+    localFastPath?: {
+      enabled?: boolean;
+      /** Hidden local worker model used for simple inbound automation. */
+      model?: string;
+      maxInputChars?: number;
+      requireFlowContext?: boolean;
+      allowMedia?: boolean;
+      promptMode?: "compact" | "minimal" | "local_worker";
+    };
   };
   /** Max concurrent agent runs across all conversations. Default: 1 (sequential). */
   maxConcurrent?: number;

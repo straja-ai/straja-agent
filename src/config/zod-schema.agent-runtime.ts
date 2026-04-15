@@ -600,6 +600,17 @@ export const AgentEntrySchema = z
     humanDelay: HumanDelaySchema.optional(),
     heartbeat: HeartbeatSchema,
     identity: IdentitySchema,
+    routing: z
+      .object({
+        purpose: z.string().optional(),
+        primaryDomains: z.array(z.string()).optional(),
+        preferredTaskTypes: z.array(z.string()).optional(),
+        forbiddenTaskTypes: z.array(z.string()).optional(),
+        toolFamiliesAvailable: z.array(z.string()).optional(),
+        shortExamples: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
     groupChat: GroupChatSchema,
     subagents: z
       .object({

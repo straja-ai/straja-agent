@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { createInternalHookEventPayload } from "../../test-utils/internal-hook-event-payload.js";
@@ -233,6 +236,316 @@ describe("dispatchReplyFromConfig", () => {
     expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
   });
 
+  it("routes flow-backed local-model turns through local fast-path with compact prompt override", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "ollama/gemma4:4b",
+          },
+          orchestration: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "Parent says Maria is absent tomorrow.",
+      FlowContext: [
+        '<flow id="absence" name="Parent absence">Update attendance and send acknowledgment.</flow>',
+      ],
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.promptModeOverride).toBe("local_worker");
+        expect(opts?.modelOverride).toBe("ollama/gemma4:4b");
+        expect(opts?.historyLimitOverride).toBe(4);
+        expect(opts?.suppressThreadHistory).toBe(true);
+        expect(opts?.suppressUntrustedContext).toBe(true);
+        expect(opts?.extraSystemPrompt).toContain("Route: local_fast_path");
+        expect(opts?.extraSystemPrompt).toContain("Assigned specialist: ollama/gemma4:4b");
+        expect(opts?.extraSystemPrompt).toContain("Execution worker: ollama/gemma4:4b");
+        return { text: "handled locally" } satisfies ReplyPayload;
+      },
+    );
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(result.orchestration?.finalRoute).toBe("local_fast_path");
+    expect(result.orchestration?.taskClass).toBe("simple_inbound_automation");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the hidden local worker model for fast-path turns even when the assigned specialist is cloud-based", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+          },
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "Parent says Maria is absent tomorrow.",
+      FlowContext: [
+        '<flow id="absence" name="Parent absence">Update attendance and send acknowledgment.</flow>',
+      ],
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.promptModeOverride).toBe("local_worker");
+        expect(opts?.modelOverride).toBe("ollama/gemma4:4b");
+        expect(opts?.historyLimitOverride).toBe(4);
+        expect(opts?.suppressThreadHistory).toBe(true);
+        expect(opts?.suppressUntrustedContext).toBe(true);
+        expect(opts?.extraSystemPrompt).toContain(
+          "Assigned specialist: anthropic/claude-sonnet-4-5",
+        );
+        expect(opts?.extraSystemPrompt).toContain("Execution worker: ollama/gemma4:4b");
+        return { text: "handled by hidden local worker" } satisfies ReplyPayload;
+      },
+    );
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(result.orchestration?.finalRoute).toBe("local_fast_path");
+    expect(result.orchestration?.assignedProvider).toBe("anthropic");
+    expect(result.orchestration?.executionProvider).toBe("ollama");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not route bare /new resets through the local fast-path", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+          },
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "/new",
+      RawBody: "/new",
+      CommandBody: "/new",
+      BodyForAgent: "/new",
+      BodyForCommands: "/new",
+      FlowContext: [
+        '<flow id="absence" name="Parent absence">Update attendance and send acknowledgment.</flow>',
+      ],
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.promptModeOverride).toBeUndefined();
+        expect(opts?.modelOverride).toBeUndefined();
+        return { text: "reset ok" } satisfies ReplyPayload;
+      },
+    );
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.blockers).toContain("not_bare_session_reset");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes regular owner messages to a better-matching specialist agent with a packetized tool subset", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+          },
+          orchestration: {
+            enabled: true,
+          },
+        },
+        list: [
+          { id: "main", default: true, name: "General Assistant" },
+          {
+            id: "school",
+            name: "School Absence Admin",
+            skills: ["attendance", "school", "absence"],
+            model: {
+              primary: "openai/gpt-5",
+            },
+          },
+        ],
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "Please handle this school absence update and reply to the parent.",
+      CommandAuthorized: true,
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.agentIdOverride).toBe("school");
+        expect(opts?.toolAllowlistOverride).toEqual(
+          expect.arrayContaining([
+            "message",
+            "vault_search",
+            "vault_get",
+            "vault_memory_search",
+            "vault_memory_get",
+            "vault_collection_write",
+          ]),
+        );
+        expect(opts?.extraSystemPrompt).toContain("Selected agent: school");
+        expect(opts?.extraSystemPrompt).toContain("Tool allowlist:");
+        return { text: "handled by school agent" } satisfies ReplyPayload;
+      },
+    );
+
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps default specialist route for cloud models even when flow context exists", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+          },
+          orchestration: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "Parent says Maria is absent tomorrow.",
+      FlowContext: [
+        '<flow id="absence" name="Parent absence">Update attendance and send acknowledgment.</flow>',
+      ],
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.promptModeOverride).toBeUndefined();
+        expect(opts?.extraSystemPrompt).toContain("Route: default_specialist");
+        return { text: "handled by cloud specialist" } satisfies ReplyPayload;
+      },
+    );
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.assignedProvider).toBe("anthropic");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("still creates a direct specialist orchestration trace when local routing is disabled", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+          },
+          orchestration: {
+            enabled: false,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "hi again",
+    });
+
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
+        expect(opts?.extraSystemPrompt).toBeUndefined();
+        return { text: "handled directly" } satisfies ReplyPayload;
+      },
+    );
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(result.orchestration?.traceId).toBeTruthy();
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.assignedProvider).toBe("anthropic");
+    expect(result.orchestration?.executionProvider).toBe("anthropic");
+    expect(result.orchestration?.reasons).toContain(
+      "Local routing disabled; assigned agent ran directly.",
+    );
+    expect(result.orchestration?.blockers).toContain("local_routing_disabled");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes orchestration traces without inbound body content", async () => {
+    setNoAbort();
+    const tracePath = path.join(os.tmpdir(), `orchestration-trace-${Date.now()}.jsonl`);
+    const cfg = {
+      diagnostics: {
+        orchestrationTrace: {
+          enabled: true,
+          filePath: tracePath,
+        },
+      },
+      agents: {
+        defaults: {
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "Private parent note about Maria being absent tomorrow.",
+      FlowContext: [
+        '<flow id="absence" name="Parent absence">Update attendance and send acknowledgment.</flow>',
+      ],
+    });
+
+    const replyResolver = async (
+      _ctx: MsgContext,
+      _opts?: GetReplyOptions,
+      _cfg?: OpenClawConfig,
+    ) => ({ text: "ok" }) satisfies ReplyPayload;
+
+    await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const content = await fs.readFile(tracePath, "utf8");
+
+    expect(content).toContain('"bodyChars":');
+    expect(content).not.toContain("Private parent note");
+    expect(content).not.toContain("messagePreview");
+  });
+
   it("suppresses group tool summaries but still forwards tool media", async () => {
     setNoAbort();
     const cfg = emptyConfig;
@@ -263,6 +576,41 @@ describe("dispatchReplyFromConfig", () => {
     expect(sent?.mediaUrls).toEqual(["https://example.com/tts-group.opus"]);
     expect(sent?.text).toBeUndefined();
     expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("primes instant typing before orchestration runs", async () => {
+    setNoAbort();
+    const onReplyStart = vi.fn(async () => {});
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "telegram",
+      ChatType: "direct",
+      Body: "hi",
+      Surface: "telegram",
+    });
+
+    const replyResolver = async () => ({ text: "hello" }) satisfies ReplyPayload;
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyResolver,
+      replyOptions: {
+        onReplyStart,
+      },
+    });
+
+    expect(onReplyStart).toHaveBeenCalledTimes(1);
   });
 
   it("sends tool results via dispatcher in DM sessions", async () => {

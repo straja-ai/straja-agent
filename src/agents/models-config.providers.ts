@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
 import type { OpenClawConfig } from "../config/config.js";
+import type { AgentModelConfig } from "../config/types.agents.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
 import {
   DEFAULT_COPILOT_API_BASE_URL,
   resolveCopilotApiToken,
 } from "../providers/github-copilot-token.js";
+import { resolveOpenClawAgentDir } from "./agent-paths.js";
 import { ensureAuthProfileStore, listProfilesForProvider } from "./auth-profiles.js";
 import { discoverBedrockModels } from "./bedrock-discovery.js";
 import {
@@ -16,7 +19,11 @@ import {
   HUGGINGFACE_MODEL_CATALOG,
   buildHuggingfaceModelDefinition,
 } from "./huggingface-models.js";
-import { resolveAwsSdkEnvVarName, resolveEnvApiKey } from "./model-auth.js";
+import {
+  ensureLocalProviderPlaceholderEnv,
+  resolveAwsSdkEnvVarName,
+  resolveEnvApiKey,
+} from "./model-auth.js";
 import { OLLAMA_NATIVE_BASE_URL } from "./ollama-stream.js";
 import {
   buildSyntheticModelDefinition,
@@ -48,6 +55,21 @@ const MINIMAX_API_COST = {
 };
 
 type ProviderModelConfig = NonNullable<ProviderConfig["models"]>[number];
+
+function buildLocalProviderFallbackModel(id: string): ModelDefinitionConfig {
+  const lower = id.toLowerCase();
+  const isReasoning =
+    lower.includes("r1") || lower.includes("reasoning") || lower.includes("think");
+  return {
+    id,
+    name: id,
+    reasoning: isReasoning,
+    input: ["text"],
+    cost: OLLAMA_DEFAULT_COST,
+    contextWindow: OLLAMA_DEFAULT_CONTEXT_WINDOW,
+    maxTokens: OLLAMA_DEFAULT_MAX_TOKENS,
+  };
+}
 
 function buildMinimaxModel(params: {
   id: string;
@@ -98,6 +120,7 @@ const MOONSHOT_DEFAULT_COST = {
 
 const QWEN_PORTAL_BASE_URL = "https://portal.qwen.ai/v1";
 const QWEN_PORTAL_OAUTH_PLACEHOLDER = "qwen-oauth";
+const OLLAMA_MANAGED_LOCAL_BASE_URL = "http://127.0.0.1:11435";
 const QWEN_PORTAL_DEFAULT_CONTEXT_WINDOW = 128000;
 const QWEN_PORTAL_DEFAULT_MAX_TOKENS = 8192;
 const QWEN_PORTAL_DEFAULT_COST = {
@@ -107,8 +130,6 @@ const QWEN_PORTAL_DEFAULT_COST = {
   cacheWrite: 0,
 };
 
-const OLLAMA_BASE_URL = OLLAMA_NATIVE_BASE_URL;
-const OLLAMA_API_BASE_URL = OLLAMA_BASE_URL;
 const OLLAMA_DEFAULT_CONTEXT_WINDOW = 128000;
 const OLLAMA_DEFAULT_MAX_TOKENS = 8192;
 const OLLAMA_DEFAULT_COST = {
@@ -171,6 +192,19 @@ type VllmModelsResponse = {
   }>;
 };
 
+function resolveManagedOllamaBaseUrlFromEnv(): string {
+  const candidate =
+    process.env.STRAJA_OLLAMA_BASE_URL?.trim() ||
+    process.env.OLLAMA_API_BASE?.trim() ||
+    process.env.OLLAMA_BASE_URL?.trim() ||
+    "";
+  if (!candidate) {
+    return OLLAMA_NATIVE_BASE_URL;
+  }
+  const trimmed = candidate.replace(/\/+$/, "");
+  return trimmed.replace(/\/v1$/i, "") || OLLAMA_NATIVE_BASE_URL;
+}
+
 /**
  * Derive the Ollama native API base URL from a configured base URL.
  *
@@ -181,11 +215,44 @@ type VllmModelsResponse = {
  */
 export function resolveOllamaApiBase(configuredBaseUrl?: string): string {
   if (!configuredBaseUrl) {
-    return OLLAMA_API_BASE_URL;
+    return resolveManagedOllamaBaseUrlFromEnv();
   }
   // Strip trailing slash, then strip /v1 suffix if present
   const trimmed = configuredBaseUrl.replace(/\/+$/, "");
   return trimmed.replace(/\/v1$/i, "");
+}
+
+async function canReachOllamaApiBase(baseUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${baseUrl}/api/tags`, {
+      signal: AbortSignal.timeout(1_500),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveReachableOllamaApiBase(configuredBaseUrl?: string): Promise<string> {
+  const resolvedBaseUrl = resolveOllamaApiBase(configuredBaseUrl);
+  const envManagedBaseUrl =
+    process.env.STRAJA_OLLAMA_BASE_URL?.trim() ||
+    process.env.OLLAMA_API_BASE?.trim() ||
+    process.env.OLLAMA_BASE_URL?.trim() ||
+    "";
+  if (configuredBaseUrl || envManagedBaseUrl) {
+    return resolvedBaseUrl;
+  }
+  if (resolvedBaseUrl !== OLLAMA_NATIVE_BASE_URL) {
+    return resolvedBaseUrl;
+  }
+  if (await canReachOllamaApiBase(resolvedBaseUrl)) {
+    return resolvedBaseUrl;
+  }
+  if (await canReachOllamaApiBase(OLLAMA_MANAGED_LOCAL_BASE_URL)) {
+    return OLLAMA_MANAGED_LOCAL_BASE_URL;
+  }
+  return resolvedBaseUrl;
 }
 
 async function discoverOllamaModels(baseUrl?: string): Promise<ModelDefinitionConfig[]> {
@@ -194,7 +261,7 @@ async function discoverOllamaModels(baseUrl?: string): Promise<ModelDefinitionCo
     return [];
   }
   try {
-    const apiBase = resolveOllamaApiBase(baseUrl);
+    const apiBase = await resolveReachableOllamaApiBase(baseUrl);
     const response = await fetch(`${apiBase}/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
@@ -207,22 +274,94 @@ async function discoverOllamaModels(baseUrl?: string): Promise<ModelDefinitionCo
       console.warn("No Ollama models found on local instance");
       return [];
     }
-    return data.models.map((model) => {
-      const modelId = model.name;
-      const isReasoning =
-        modelId.toLowerCase().includes("r1") || modelId.toLowerCase().includes("reasoning");
-      return {
-        id: modelId,
-        name: modelId,
-        reasoning: isReasoning,
-        input: ["text"],
-        cost: OLLAMA_DEFAULT_COST,
-        contextWindow: OLLAMA_DEFAULT_CONTEXT_WINDOW,
-        maxTokens: OLLAMA_DEFAULT_MAX_TOKENS,
-      };
-    });
+    return data.models.map((model) => buildLocalProviderFallbackModel(model.name));
   } catch (error) {
     console.warn(`Failed to discover Ollama models: ${String(error)}`);
+    return [];
+  }
+}
+
+function collectConfiguredProviderModelIds(
+  config: OpenClawConfig | undefined,
+  provider: string,
+): string[] {
+  const configured = new Set<string>();
+  const normalizedProvider = provider.trim().toLowerCase();
+
+  const addRef = (ref: string | undefined) => {
+    const trimmed = ref?.trim() ?? "";
+    if (!trimmed) {
+      return;
+    }
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0) {
+      return;
+    }
+    const providerId = trimmed.slice(0, slash).trim().toLowerCase();
+    const modelId = trimmed.slice(slash + 1).trim();
+    if (!modelId || providerId !== normalizedProvider) {
+      return;
+    }
+    configured.add(modelId);
+  };
+
+  const addModelList = (
+    model: AgentModelConfig | { primary?: string; fallbacks?: string[] } | string | undefined,
+  ) => {
+    if (!model) {
+      return;
+    }
+    if (typeof model === "string") {
+      addRef(model);
+      return;
+    }
+    addRef(model.primary);
+    for (const fallback of model.fallbacks ?? []) {
+      addRef(fallback);
+    }
+  };
+
+  addModelList(config?.agents?.defaults?.model);
+  for (const agent of config?.agents?.list ?? []) {
+    addModelList(agent.model);
+    addModelList(agent.subagents?.model);
+  }
+
+  return Array.from(configured);
+}
+
+function mergeConfiguredProviderModels(
+  discovered: ModelDefinitionConfig[],
+  configuredIds: string[],
+): ModelDefinitionConfig[] {
+  if (configuredIds.length === 0) {
+    return discovered;
+  }
+  const merged = new Map<string, ModelDefinitionConfig>(
+    discovered.map((model) => [model.id, model]),
+  );
+  for (const id of configuredIds) {
+    if (!merged.has(id)) {
+      merged.set(id, buildLocalProviderFallbackModel(id));
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function readProviderModelIdsFromCatalog(agentDir: string, provider: string): string[] {
+  try {
+    const raw = readFileSync(`${agentDir}/models.json`, "utf8");
+    const parsed = JSON.parse(raw) as {
+      providers?: Record<string, { models?: Array<{ id?: unknown }> } | undefined>;
+    };
+    const models = parsed.providers?.[provider]?.models;
+    if (!Array.isArray(models)) {
+      return [];
+    }
+    return models
+      .map((model) => (typeof model?.id === "string" ? model.id.trim() : ""))
+      .filter(Boolean);
+  } catch {
     return [];
   }
 }
@@ -545,10 +684,30 @@ async function buildVeniceProvider(): Promise<ProviderConfig> {
   };
 }
 
-async function buildOllamaProvider(configuredBaseUrl?: string): Promise<ProviderConfig> {
-  const models = await discoverOllamaModels(configuredBaseUrl);
+async function buildOllamaProvider(params?: {
+  configuredBaseUrl?: string;
+  config?: OpenClawConfig;
+  agentDir?: string;
+}): Promise<ProviderConfig> {
+  const configuredBaseUrl = params?.configuredBaseUrl;
+  const configuredIds = collectConfiguredProviderModelIds(params?.config, "ollama");
+  const inheritedIds = new Set(configuredIds);
+  for (const id of readProviderModelIdsFromCatalog(params?.agentDir ?? "", "ollama")) {
+    inheritedIds.add(id);
+  }
+  const defaultAgentDir = resolveOpenClawAgentDir();
+  if (defaultAgentDir !== params?.agentDir) {
+    for (const id of readProviderModelIdsFromCatalog(defaultAgentDir, "ollama")) {
+      inheritedIds.add(id);
+    }
+  }
+  const resolvedBaseUrl = await resolveReachableOllamaApiBase(configuredBaseUrl);
+  const models = mergeConfiguredProviderModels(
+    await discoverOllamaModels(resolvedBaseUrl),
+    Array.from(inheritedIds),
+  );
   return {
-    baseUrl: resolveOllamaApiBase(configuredBaseUrl),
+    baseUrl: resolvedBaseUrl,
     api: "ollama",
     models,
   };
@@ -659,6 +818,7 @@ export function buildNvidiaProvider(): ProviderConfig {
 export async function resolveImplicitProviders(params: {
   agentDir: string;
   explicitProviders?: Record<string, ProviderConfig> | null;
+  config?: OpenClawConfig;
 }): Promise<ModelsConfig["providers"]> {
   const providers: Record<string, ProviderConfig> = {};
   const authStore = ensureAuthProfileStore(params.agentDir, {
@@ -749,10 +909,18 @@ export async function resolveImplicitProviders(params: {
   // discovery so that remote / non-default Ollama instances are reachable.
   const ollamaKey =
     resolveEnvApiKeyVarName("ollama") ??
-    resolveApiKeyFromProfiles({ provider: "ollama", store: authStore });
+    resolveApiKeyFromProfiles({ provider: "ollama", store: authStore }) ??
+    (ensureLocalProviderPlaceholderEnv("ollama") ? "OLLAMA_API_KEY" : undefined);
   if (ollamaKey) {
     const ollamaBaseUrl = params.explicitProviders?.ollama?.baseUrl;
-    providers.ollama = { ...(await buildOllamaProvider(ollamaBaseUrl)), apiKey: ollamaKey };
+    providers.ollama = {
+      ...(await buildOllamaProvider({
+        configuredBaseUrl: ollamaBaseUrl,
+        config: params.config,
+        agentDir: params.agentDir,
+      })),
+      apiKey: ollamaKey,
+    };
   }
 
   // vLLM provider - OpenAI-compatible local server (opt-in via env/profile).

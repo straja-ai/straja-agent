@@ -121,13 +121,13 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
             result,
             sessionId: hookCtx?.sessionKey,
           });
-          const finalResult = guardedResult.blocked
+          const finalResult: AgentToolResult<unknown> = guardedResult.blocked
             ? jsonResult({
                 status: "error",
                 tool: normalizedName,
                 error: guardedResult.reason || "Tool result blocked by Straja Guard",
               })
-            : guardedResult.result;
+            : (guardedResult.result as AgentToolResult<unknown>);
           const afterParams = beforeHookWrapped
             ? (consumeAdjustedParamsForToolCall(toolCallId) ?? executeParams)
             : executeParams;
@@ -209,7 +209,11 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
 // These tools are intercepted to return a "pending" result instead of executing
 export function toClientToolDefinitions(
   tools: ClientToolDefinition[],
-  onClientToolCall?: (toolName: string, params: Record<string, unknown>) => void,
+  onClientToolCall?: (
+    toolName: string,
+    params: Record<string, unknown>,
+    toolCallId: string,
+  ) => void,
   hookContext?: HookContext,
 ): ToolDefinition[] {
   return tools.map((tool) => {
@@ -234,7 +238,7 @@ export function toClientToolDefinitions(
         const paramsRecord = isPlainObject(adjustedParams) ? adjustedParams : {};
         // Notify handler that a client tool was called
         if (onClientToolCall) {
-          onClientToolCall(func.name, paramsRecord);
+          onClientToolCall(func.name, paramsRecord, toolCallId);
         }
         // Return a pending result - the client will execute this tool
         return jsonResult({

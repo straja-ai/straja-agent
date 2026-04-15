@@ -86,7 +86,11 @@ export async function ensureOpenClawModelsJson(
   const agentDir = agentDirOverride?.trim() ? agentDirOverride.trim() : resolveOpenClawAgentDir();
 
   const explicitProviders = cfg.models?.providers ?? {};
-  const implicitProviders = await resolveImplicitProviders({ agentDir, explicitProviders });
+  const implicitProviders = await resolveImplicitProviders({
+    agentDir,
+    explicitProviders,
+    config: cfg,
+  });
   const providers: Record<string, ProviderConfig> = mergeProviders({
     implicit: implicitProviders,
     explicit: explicitProviders,

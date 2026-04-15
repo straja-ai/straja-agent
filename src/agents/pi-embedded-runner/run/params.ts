@@ -63,6 +63,7 @@ export type RunEmbeddedPiAgentParams = {
   agentDir?: string;
   config?: OpenClawConfig;
   skillsSnapshot?: SkillSnapshot;
+  toolAllowlistOverride?: string[];
   prompt: string;
   images?: ImageContent[];
   /** Optional client-provided tools (OpenResponses hosted tools). */
@@ -99,6 +100,9 @@ export type RunEmbeddedPiAgentParams = {
   lane?: string;
   enqueue?: typeof enqueueCommand;
   extraSystemPrompt?: string;
+  promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
+  orchestrationTraceId?: string;
+  historyLimitOverride?: number;
   inputProvenance?: InputProvenance;
   streamParams?: AgentStreamParams;
   ownerNumbers?: string[];

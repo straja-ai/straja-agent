@@ -6,6 +6,11 @@ import { streamSimple } from "@mariozechner/pi-ai";
 import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { stripInboundUserContextPrefix } from "../../../auto-reply/reply/inbound-meta.js";
+import {
+  persistOrchestrationPromptInput,
+  persistOrchestrationPromptOutput,
+  persistOrchestrationStep,
+} from "../../../auto-reply/reply/orchestration-vault.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
@@ -52,6 +57,7 @@ import { subscribeEmbeddedPiSession } from "../../pi-embedded-subscribe.js";
 import { applyPiCompactionSettingsFromConfig } from "../../pi-settings.js";
 import { toClientToolDefinitions } from "../../pi-tool-definition-adapter.js";
 import { createOpenClawCodingTools, resolveToolLoopDetectionConfig } from "../../pi-tools.js";
+import type { AnyAgentTool } from "../../pi-tools.types.js";
 import { resolveSandboxContext } from "../../sandbox.js";
 import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
 import { guardSessionManager } from "../../session-tool-result-guard-wrapper.js";
@@ -84,7 +90,11 @@ import {
   sanitizeSessionHistory,
   sanitizeToolsForGoogle,
 } from "../google.js";
-import { getDmHistoryLimitFromSessionKey, limitHistoryTurns } from "../history.js";
+import {
+  getDmHistoryLimitFromSessionKey,
+  limitHistoryTurns,
+  resolveEffectiveHistoryTurnLimit,
+} from "../history.js";
 import { log } from "../logger.js";
 import { buildModelAliasLines } from "../model.js";
 import {
@@ -234,6 +244,88 @@ function summarizeSessionContext(messages: AgentMessage[]): {
   };
 }
 
+function serializeToolDefinitions(tools: AnyAgentTool[]): Array<{
+  name: string;
+  label?: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+}> {
+  return tools.map((tool) => ({
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    parameters:
+      tool.parameters && typeof tool.parameters === "object"
+        ? (tool.parameters as Record<string, unknown>)
+        : undefined,
+  }));
+}
+
+function wrapToolsForOrchestrationTrace(params: {
+  tools: AnyAgentTool[];
+  traceId?: string;
+  runId: string;
+  sessionId: string;
+}): AnyAgentTool[] {
+  if (!params.traceId) {
+    return params.tools;
+  }
+  return params.tools.map((tool) => {
+    if (!tool.execute) {
+      return tool;
+    }
+    const execute = tool.execute.bind(tool);
+    return {
+      ...tool,
+      execute: async (toolCallId, toolParams, signal, onUpdate) => {
+        await persistOrchestrationStep({
+          traceId: params.traceId!,
+          stage: "tool:call",
+          data: {
+            runId: params.runId,
+            sessionId: params.sessionId,
+            toolCallId,
+            toolName: tool.name,
+            toolLabel: tool.label,
+            params: toolParams,
+          },
+        });
+        try {
+          const result = await execute(toolCallId, toolParams, signal, onUpdate);
+          await persistOrchestrationStep({
+            traceId: params.traceId!,
+            stage: "tool:result",
+            data: {
+              runId: params.runId,
+              sessionId: params.sessionId,
+              toolCallId,
+              toolName: tool.name,
+              result,
+            },
+          });
+          return result;
+        } catch (err) {
+          await persistOrchestrationStep({
+            traceId: params.traceId!,
+            stage: "tool:error",
+            data: {
+              runId: params.runId,
+              sessionId: params.sessionId,
+              toolCallId,
+              toolName: tool.name,
+              error:
+                err instanceof Error
+                  ? { name: err.name, message: err.message, stack: err.stack }
+                  : String(err),
+            },
+          });
+          throw err;
+        }
+      },
+    };
+  });
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -286,6 +378,10 @@ export async function runEmbeddedAttempt(
     });
 
     const sessionLabel = params.sessionKey ?? params.sessionId;
+    const compactLocalPrompt =
+      params.model.api === "ollama" &&
+      !isSubagentSessionKey(params.sessionKey) &&
+      !isCronSessionKey(params.sessionKey);
     const { bootstrapFiles: hookAdjustedBootstrapFiles, contextFiles } =
       await resolveBootstrapContextForRun({
         workspaceDir: effectiveWorkspace,
@@ -293,6 +389,7 @@ export async function runEmbeddedAttempt(
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,
         warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
+        compactLocal: compactLocalPrompt,
       });
     const workspaceNotes = hookAdjustedBootstrapFiles.some(
       (file) => file.name === DEFAULT_BOOTSTRAP_FILENAME && !file.missing,
@@ -304,7 +401,7 @@ export async function runEmbeddedAttempt(
 
     // Check if the model supports native image input
     const modelHasVision = params.model.input?.includes("image") ?? false;
-    const toolsRaw = params.disableTools
+    const untracedToolsRaw = params.disableTools
       ? []
       : createOpenClawCodingTools({
           exec: {
@@ -342,7 +439,14 @@ export async function runEmbeddedAttempt(
           requireExplicitMessageTarget:
             params.requireExplicitMessageTarget ?? isSubagentSessionKey(params.sessionKey),
           disableMessageTool: params.disableMessageTool,
+          toolNameAllowlist: params.toolAllowlistOverride,
         });
+    const toolsRaw = wrapToolsForOrchestrationTrace({
+      tools: untracedToolsRaw,
+      traceId: params.orchestrationTraceId,
+      runId: params.runId,
+      sessionId: params.sessionId,
+    });
     const tools = sanitizeToolsForGoogle({ tools: toolsRaw, provider: params.provider });
     logToolSchemasForGoogle({ tools, provider: params.provider });
 
@@ -439,9 +543,12 @@ export async function runEmbeddedAttempt(
     });
     const isDefaultAgent = sessionAgentId === defaultAgentId;
     const promptMode =
-      isSubagentSessionKey(params.sessionKey) || isCronSessionKey(params.sessionKey)
+      params.promptModeOverride ??
+      (isSubagentSessionKey(params.sessionKey) || isCronSessionKey(params.sessionKey)
         ? "minimal"
-        : "full";
+        : compactLocalPrompt
+          ? "compact"
+          : "full");
     const docsPath = await resolveOpenClawDocsPath({
       workspaceDir: effectiveWorkspace,
       argv1: process.argv[1],
@@ -572,8 +679,38 @@ export async function runEmbeddedAttempt(
       const clientToolDefs = params.clientTools
         ? toClientToolDefinitions(
             params.clientTools,
-            (toolName, toolParams) => {
+            (toolName, toolParams, toolCallId) => {
               clientToolCallDetected = { name: toolName, params: toolParams };
+              if (params.orchestrationTraceId) {
+                void persistOrchestrationStep({
+                  traceId: params.orchestrationTraceId,
+                  stage: "tool:call",
+                  data: {
+                    runId: params.runId,
+                    sessionId: params.sessionId,
+                    toolCallId,
+                    toolName,
+                    params: toolParams,
+                    delegatedToClient: true,
+                  },
+                });
+                void persistOrchestrationStep({
+                  traceId: params.orchestrationTraceId,
+                  stage: "tool:result",
+                  data: {
+                    runId: params.runId,
+                    sessionId: params.sessionId,
+                    toolCallId,
+                    toolName,
+                    delegatedToClient: true,
+                    result: {
+                      status: "pending",
+                      tool: toolName,
+                      message: "Tool execution delegated to client",
+                    },
+                  },
+                });
+              }
             },
             {
               agentId: sessionAgentId,
@@ -691,7 +828,12 @@ export async function runEmbeddedAttempt(
           : validatedGemini;
         const truncated = limitHistoryTurns(
           validated,
-          getDmHistoryLimitFromSessionKey(params.sessionKey, params.config),
+          resolveEffectiveHistoryTurnLimit({
+            limit:
+              params.historyLimitOverride ??
+              getDmHistoryLimitFromSessionKey(params.sessionKey, params.config),
+            promptModeOverride: params.promptModeOverride,
+          }),
         );
         // Re-run tool_use/tool_result pairing repair after truncation, since
         // limitHistoryTurns can orphan tool_result blocks by removing the
@@ -1056,6 +1198,39 @@ export async function runEmbeddedAttempt(
                 log.warn(`llm_input hook failed: ${String(err)}`);
               });
           }
+          if (params.orchestrationTraceId) {
+            void persistOrchestrationPromptInput({
+              traceId: params.orchestrationTraceId,
+              runId: params.runId,
+              sessionId: params.sessionId,
+              provider: params.provider,
+              model: params.modelId,
+              systemPrompt: systemPromptText,
+              prompt: effectivePrompt,
+              historyMessages: activeSession.messages,
+              imagesCount: imageResult.images.length,
+              toolDefinitions: serializeToolDefinitions(tools),
+              toolAllowlist: params.toolAllowlistOverride,
+              systemPromptReport,
+            });
+            void persistOrchestrationStep({
+              traceId: params.orchestrationTraceId,
+              stage: "llm_input",
+              data: {
+                runId: params.runId,
+                sessionId: params.sessionId,
+                provider: params.provider,
+                model: params.modelId,
+                systemPromptChars: systemPromptText?.length ?? 0,
+                promptChars: effectivePrompt.length,
+                historyMessageCount: activeSession.messages.length,
+                toolDefinitionCount: tools.length,
+                toolAllowlist: params.toolAllowlistOverride,
+                systemPromptReport,
+                imagesCount: imageResult.images.length,
+              },
+            });
+          }
 
           if (skipGuardModelChecks) {
             effectivePrompt = hookResult?.prependContext
@@ -1308,6 +1483,30 @@ export async function runEmbeddedAttempt(
           .catch((err) => {
             log.warn(`llm_output hook failed: ${String(err)}`);
           });
+      }
+      if (params.orchestrationTraceId) {
+        void persistOrchestrationPromptOutput({
+          traceId: params.orchestrationTraceId,
+          runId: params.runId,
+          sessionId: params.sessionId,
+          provider: params.provider,
+          model: params.modelId,
+          assistantTexts,
+          lastAssistant,
+          usage: getUsageTotals(),
+        });
+        void persistOrchestrationStep({
+          traceId: params.orchestrationTraceId,
+          stage: "llm_output",
+          data: {
+            runId: params.runId,
+            sessionId: params.sessionId,
+            provider: params.provider,
+            model: params.modelId,
+            assistantTextCount: assistantTexts.length,
+            usage: getUsageTotals(),
+          },
+        });
       }
 
       return {

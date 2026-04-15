@@ -139,6 +139,34 @@ export const AgentDefaultsSchema = z
       ])
       .optional(),
     heartbeat: HeartbeatSchema,
+    orchestration: z
+      .object({
+        enabled: z.boolean().optional(),
+        router: z
+          .object({
+            enabled: z.boolean().optional(),
+            model: z.string().optional(),
+            timeoutMs: z.number().int().positive().optional(),
+            maxTokens: z.number().int().positive().optional(),
+          })
+          .strict()
+          .optional(),
+        localFastPath: z
+          .object({
+            enabled: z.boolean().optional(),
+            model: z.string().optional(),
+            maxInputChars: z.number().int().positive().optional(),
+            requireFlowContext: z.boolean().optional(),
+            allowMedia: z.boolean().optional(),
+            promptMode: z
+              .union([z.literal("compact"), z.literal("minimal"), z.literal("local_worker")])
+              .optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     maxConcurrent: z.number().int().positive().optional(),
     subagents: z
       .object({

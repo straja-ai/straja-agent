@@ -53,6 +53,24 @@ export type GetReplyOptions = {
   hasRepliedRef?: { value: boolean };
   /** Override agent timeout in seconds (0 = no timeout). Threads through to resolveAgentTimeoutMs. */
   timeoutOverrideSeconds?: number;
+  /** Optional extra system prompt appended for this specific run. */
+  extraSystemPrompt?: string;
+  /** Optional prompt profile override for this specific run. */
+  promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
+  /** Optional runtime model override for this specific run. */
+  modelOverride?: string;
+  /** Optional runtime agent override for this specific run. */
+  agentIdOverride?: string;
+  /** Optional narrowed tool allowlist for this specific run. */
+  toolAllowlistOverride?: string[];
+  /** Optional orchestration trace id for vault-backed run debugging. */
+  orchestrationTraceId?: string;
+  /** Optional transcript history limit for this run. */
+  historyLimitOverride?: number;
+  /** When true, skip thread history/thread starter injection for this run. */
+  suppressThreadHistory?: boolean;
+  /** When true, skip untrusted context injection for this run. */
+  suppressUntrustedContext?: boolean;
 };
 
 export type ReplyPayload = {

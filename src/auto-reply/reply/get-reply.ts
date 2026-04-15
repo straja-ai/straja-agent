@@ -20,6 +20,7 @@ import { resolveReplyDirectives } from "./get-reply-directives.js";
 import { handleInlineActions } from "./get-reply-inline-actions.js";
 import { runPreparedReply } from "./get-reply-run.js";
 import { finalizeInboundContext } from "./inbound-context.js";
+import { persistOrchestrationStep } from "./orchestration-vault.js";
 import { applyResetModelOverride } from "./session-reset-model.js";
 import { initSessionState } from "./session.js";
 import { stageSandboxMedia } from "./stage-sandbox-media.js";
@@ -60,10 +61,12 @@ export async function getReplyFromConfig(
   const targetSessionKey =
     ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
   const agentSessionKey = targetSessionKey || ctx.SessionKey;
-  const agentId = resolveSessionAgentId({
-    sessionKey: agentSessionKey,
-    config: cfg,
-  });
+  const agentId =
+    opts?.agentIdOverride?.trim() ||
+    resolveSessionAgentId({
+      sessionKey: agentSessionKey,
+      config: cfg,
+    });
   const mergedSkillFilter = mergeSkillFilters(
     opts?.skillFilter,
     resolveAgentSkillsFilter(cfg, agentId),
@@ -97,12 +100,64 @@ export async function getReplyFromConfig(
       hasResolvedHeartbeatModelOverride = true;
     }
   }
+  const runtimeModelOverrideRaw = opts?.modelOverride?.trim() ?? "";
+  const persistTraceStep = async (stage: string, data: Record<string, unknown>) => {
+    const traceId = opts?.orchestrationTraceId?.trim();
+    if (!traceId) {
+      return;
+    }
+    await persistOrchestrationStep({
+      traceId,
+      stage,
+      data,
+    });
+  };
+  if (runtimeModelOverrideRaw) {
+    const runtimeModelRef = resolveModelRefFromString({
+      raw: runtimeModelOverrideRaw,
+      defaultProvider,
+      aliasIndex,
+    });
+    if (runtimeModelRef) {
+      provider = runtimeModelRef.ref.provider;
+      model = runtimeModelRef.ref.model;
+    }
+  }
+
+  await persistTraceStep("reply:start", {
+    agentId,
+    provider,
+    model,
+    runtimeModelOverrideRaw: runtimeModelOverrideRaw || undefined,
+    promptModeOverride: resolvedOpts?.promptModeOverride,
+    hasHeartbeatOverride: hasResolvedHeartbeatModelOverride,
+  });
 
   const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, agentId) ?? DEFAULT_AGENT_WORKSPACE_DIR;
-  const workspace = await ensureAgentWorkspace({
-    dir: workspaceDirRaw,
-    ensureBootstrapFiles: !agentCfg?.skipBootstrap && !isFastTestEnv,
-  });
+  const shouldEnsureBootstrapFiles =
+    !agentCfg?.skipBootstrap &&
+    !isFastTestEnv &&
+    resolvedOpts?.promptModeOverride !== "local_worker";
+  let workspace;
+  try {
+    await persistTraceStep("reply:workspace:start", {
+      workspaceDirRaw,
+      ensureBootstrapFiles: shouldEnsureBootstrapFiles,
+    });
+    workspace = await ensureAgentWorkspace({
+      dir: workspaceDirRaw,
+      ensureBootstrapFiles: shouldEnsureBootstrapFiles,
+    });
+    await persistTraceStep("reply:workspace:end", {
+      workspaceDir: workspace.dir,
+    });
+  } catch (err) {
+    await persistTraceStep("reply:workspace:error", {
+      error: String(err),
+      workspaceDirRaw,
+    });
+    throw err;
+  }
   const workspaceDir = workspace.dir;
   const agentDir = resolveAgentDir(cfg, agentId);
   const timeoutMs = resolveAgentTimeoutMs({ cfg, overrideSeconds: opts?.timeoutOverrideSeconds });
@@ -119,19 +174,60 @@ export async function getReplyFromConfig(
   });
   opts?.onTypingController?.(typing);
 
-  const finalized = finalizeInboundContext(ctx);
+  let finalized;
+  try {
+    await persistTraceStep("reply:context_finalize:start", {});
+    finalized = finalizeInboundContext(ctx);
+    await persistTraceStep("reply:context_finalize:end", {
+      hasBody: Boolean(finalized.Body?.trim()),
+      hasBodyForAgent: Boolean(finalized.BodyForAgent?.trim()),
+      hasBodyForCommands: Boolean(finalized.BodyForCommands?.trim()),
+      mediaCount: finalized.MediaPaths?.length ?? (finalized.MediaPath ? 1 : 0),
+    });
+  } catch (err) {
+    await persistTraceStep("reply:context_finalize:error", {
+      error: String(err),
+    });
+    throw err;
+  }
 
   if (!isFastTestEnv) {
-    await applyMediaUnderstanding({
-      ctx: finalized,
-      cfg,
-      agentDir,
-      activeModel: { provider, model },
-    });
-    await applyLinkUnderstanding({
-      ctx: finalized,
-      cfg,
-    });
+    try {
+      await persistTraceStep("reply:media_understanding:start", {
+        hasMedia: Boolean(finalized.MediaPath) || (finalized.MediaPaths?.length ?? 0) > 0,
+      });
+      await applyMediaUnderstanding({
+        ctx: finalized,
+        cfg,
+        agentDir,
+        activeModel: { provider, model },
+      });
+      await persistTraceStep("reply:media_understanding:end", {
+        hasMediaUnderstanding: (finalized.MediaUnderstanding?.length ?? 0) > 0,
+        mediaUnderstandingCount: finalized.MediaUnderstanding?.length ?? 0,
+      });
+    } catch (err) {
+      await persistTraceStep("reply:media_understanding:error", {
+        error: String(err),
+      });
+      throw err;
+    }
+
+    try {
+      await persistTraceStep("reply:link_understanding:start", {});
+      await applyLinkUnderstanding({
+        ctx: finalized,
+        cfg,
+      });
+      await persistTraceStep("reply:link_understanding:end", {
+        linkUnderstandingCount: finalized.LinkUnderstanding?.length ?? 0,
+      });
+    } catch (err) {
+      await persistTraceStep("reply:link_understanding:error", {
+        error: String(err),
+      });
+      throw err;
+    }
   }
 
   const commandAuthorized = finalized.CommandAuthorized;
@@ -140,11 +236,29 @@ export async function getReplyFromConfig(
     cfg,
     commandAuthorized,
   });
-  const sessionState = await initSessionState({
-    ctx: finalized,
-    cfg,
-    commandAuthorized,
-  });
+  let sessionState;
+  try {
+    await persistTraceStep("reply:session_init:start", {
+      commandAuthorized,
+    });
+    sessionState = await initSessionState({
+      ctx: finalized,
+      cfg,
+      commandAuthorized,
+    });
+    await persistTraceStep("reply:session_init:end", {
+      sessionKey: sessionState.sessionKey,
+      sessionId: sessionState.sessionId,
+      isNewSession: sessionState.isNewSession,
+      resetTriggered: sessionState.resetTriggered,
+    });
+  } catch (err) {
+    await persistTraceStep("reply:session_init:error", {
+      error: String(err),
+      commandAuthorized,
+    });
+    throw err;
+  }
   let {
     sessionCtx,
     sessionEntry,
@@ -163,50 +277,98 @@ export async function getReplyFromConfig(
     triggerBodyNormalized,
     bodyStripped,
   } = sessionState;
-
-  await applyResetModelOverride({
-    cfg,
-    resetTriggered,
-    bodyStripped,
-    sessionCtx,
-    ctx: finalized,
-    sessionEntry,
-    sessionStore,
-    sessionKey,
-    storePath,
-    defaultProvider,
-    defaultModel,
-    aliasIndex,
-  });
-
-  const directiveResult = await resolveReplyDirectives({
-    ctx: finalized,
-    cfg,
+  await persistTraceStep("reply:session_initialized", {
     agentId,
-    agentDir,
-    workspaceDir,
-    agentCfg,
-    sessionCtx,
-    sessionEntry,
-    sessionStore,
     sessionKey,
-    storePath,
-    sessionScope,
-    groupResolution,
-    isGroup,
-    triggerBodyNormalized,
+    sessionId,
+    isNewSession,
+    resetTriggered,
     commandAuthorized,
-    defaultProvider,
-    defaultModel,
-    aliasIndex,
     provider,
     model,
-    hasResolvedHeartbeatModelOverride,
-    typing,
-    opts: resolvedOpts,
-    skillFilter: mergedSkillFilter,
   });
+
+  try {
+    await persistTraceStep("reply:reset_model:start", {
+      resetTriggered,
+      hasBody: Boolean(bodyStripped?.trim()),
+    });
+    await applyResetModelOverride({
+      cfg,
+      resetTriggered,
+      bodyStripped,
+      sessionCtx,
+      ctx: finalized,
+      sessionEntry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      defaultProvider,
+      defaultModel,
+      aliasIndex,
+    });
+    await persistTraceStep("reply:reset_model:end", {
+      resetTriggered,
+      bodyAfterReset: sessionCtx.BodyStripped ?? sessionCtx.Body ?? "",
+    });
+  } catch (err) {
+    await persistTraceStep("reply:reset_model:error", {
+      error: String(err),
+    });
+    throw err;
+  }
+
+  let directiveResult;
+  try {
+    await persistTraceStep("reply:directives:start", {
+      provider,
+      model,
+      runtimeModelOverrideRaw: runtimeModelOverrideRaw || undefined,
+      promptModeOverride: resolvedOpts?.promptModeOverride,
+    });
+    directiveResult = await resolveReplyDirectives({
+      ctx: finalized,
+      cfg,
+      agentId,
+      agentDir,
+      workspaceDir,
+      agentCfg,
+      sessionCtx,
+      sessionEntry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      sessionScope,
+      groupResolution,
+      isGroup,
+      triggerBodyNormalized,
+      commandAuthorized,
+      defaultProvider,
+      defaultModel,
+      aliasIndex,
+      provider,
+      model,
+      hasResolvedHeartbeatModelOverride,
+      typing,
+      opts: resolvedOpts,
+      skillFilter: mergedSkillFilter,
+    });
+    await persistTraceStep("reply:directives:end", {
+      kind: directiveResult.kind,
+    });
+  } catch (err) {
+    await persistTraceStep("reply:directives:error", {
+      error: String(err),
+      provider,
+      model,
+    });
+    throw err;
+  }
   if (directiveResult.kind === "reply") {
+    await persistTraceStep("reply:short_circuit", {
+      source: "directives",
+      hasReply: directiveResult.reply !== undefined,
+    });
     return directiveResult.reply;
   }
 
@@ -240,102 +402,170 @@ export async function getReplyFromConfig(
   } = directiveResult.result;
   provider = resolvedProvider;
   model = resolvedModel;
+  if (runtimeModelOverrideRaw) {
+    const runtimeModelRef = resolveModelRefFromString({
+      raw: runtimeModelOverrideRaw,
+      defaultProvider,
+      aliasIndex,
+    });
+    if (runtimeModelRef) {
+      provider = runtimeModelRef.ref.provider;
+      model = runtimeModelRef.ref.model;
+    }
+  }
 
-  const inlineActionResult = await handleInlineActions({
-    ctx,
-    sessionCtx,
-    cfg,
-    agentId,
-    agentDir,
-    sessionEntry,
-    previousSessionEntry,
-    sessionStore,
-    sessionKey,
-    storePath,
-    sessionScope,
-    workspaceDir,
-    isGroup,
-    opts: resolvedOpts,
-    typing,
-    allowTextCommands,
-    inlineStatusRequested,
-    command,
-    skillCommands,
-    directives,
-    cleanedBody,
-    elevatedEnabled,
-    elevatedAllowed,
-    elevatedFailures,
-    defaultActivation: () => defaultActivation,
-    resolvedThinkLevel,
-    resolvedVerboseLevel,
-    resolvedReasoningLevel,
-    resolvedElevatedLevel,
-    resolveDefaultThinkingLevel: modelState.resolveDefaultThinkingLevel,
-    provider,
-    model,
-    contextTokens,
-    directiveAck,
-    abortedLastRun,
-    skillFilter: mergedSkillFilter,
-  });
+  let inlineActionResult;
+  try {
+    await persistTraceStep("reply:inline_actions:start", {
+      provider,
+      model,
+      inlineStatusRequested,
+    });
+    inlineActionResult = await handleInlineActions({
+      ctx,
+      sessionCtx,
+      cfg,
+      agentId,
+      agentDir,
+      sessionEntry,
+      previousSessionEntry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      sessionScope,
+      workspaceDir,
+      isGroup,
+      opts: resolvedOpts,
+      typing,
+      allowTextCommands,
+      inlineStatusRequested,
+      command,
+      skillCommands,
+      directives,
+      cleanedBody,
+      elevatedEnabled,
+      elevatedAllowed,
+      elevatedFailures,
+      defaultActivation: () => defaultActivation,
+      resolvedThinkLevel,
+      resolvedVerboseLevel,
+      resolvedReasoningLevel,
+      resolvedElevatedLevel,
+      resolveDefaultThinkingLevel: modelState.resolveDefaultThinkingLevel,
+      provider,
+      model,
+      contextTokens,
+      directiveAck,
+      abortedLastRun,
+      skillFilter: mergedSkillFilter,
+    });
+    await persistTraceStep("reply:inline_actions:end", {
+      kind: inlineActionResult.kind,
+    });
+  } catch (err) {
+    await persistTraceStep("reply:inline_actions:error", {
+      error: String(err),
+      provider,
+      model,
+    });
+    throw err;
+  }
   if (inlineActionResult.kind === "reply") {
+    await persistTraceStep("reply:short_circuit", {
+      source: "inline_actions",
+      hasReply: inlineActionResult.reply !== undefined,
+    });
     return inlineActionResult.reply;
   }
   directives = inlineActionResult.directives;
   abortedLastRun = inlineActionResult.abortedLastRun ?? abortedLastRun;
 
-  await stageSandboxMedia({
-    ctx,
-    sessionCtx,
-    cfg,
-    sessionKey,
-    workspaceDir,
-  });
+  try {
+    await persistTraceStep("reply:stage_media:start", {
+      hasMedia: Boolean(ctx.MediaPath || ctx.MediaUrl),
+    });
+    await stageSandboxMedia({
+      ctx,
+      sessionCtx,
+      cfg,
+      sessionKey,
+      workspaceDir,
+    });
+    await persistTraceStep("reply:stage_media:end", {
+      hasMedia: Boolean(sessionCtx.MediaPath || sessionCtx.MediaUrl),
+    });
+  } catch (err) {
+    await persistTraceStep("reply:stage_media:error", {
+      error: String(err),
+    });
+    throw err;
+  }
 
-  return runPreparedReply({
-    ctx,
-    sessionCtx,
-    cfg,
-    agentId,
-    agentDir,
-    agentCfg,
-    sessionCfg,
-    commandAuthorized,
-    command,
-    commandSource,
-    allowTextCommands,
-    directives,
-    defaultActivation,
-    resolvedThinkLevel,
-    resolvedVerboseLevel,
-    resolvedReasoningLevel,
-    resolvedElevatedLevel,
-    execOverrides,
-    elevatedEnabled,
-    elevatedAllowed,
-    blockStreamingEnabled,
-    blockReplyChunking,
-    resolvedBlockStreamingBreak,
-    modelState,
-    provider,
-    model,
-    perMessageQueueMode,
-    perMessageQueueOptions,
-    typing,
-    opts: resolvedOpts,
-    defaultProvider,
-    defaultModel,
-    timeoutMs,
-    isNewSession,
-    resetTriggered,
-    systemSent,
-    sessionEntry,
-    sessionStore,
-    sessionKey,
-    sessionId,
-    storePath,
-    workspaceDir,
-    abortedLastRun,
-  });
+  try {
+    await persistTraceStep("reply:run_prepared:start", {
+      provider,
+      model,
+      timeoutMs,
+      promptModeOverride: resolvedOpts?.promptModeOverride,
+      historyLimitOverride: resolvedOpts?.historyLimitOverride,
+      toolAllowlistOverride: resolvedOpts?.toolAllowlistOverride,
+    });
+    const reply = await runPreparedReply({
+      ctx,
+      sessionCtx,
+      cfg,
+      agentId,
+      agentDir,
+      agentCfg,
+      sessionCfg,
+      commandAuthorized,
+      command,
+      commandSource,
+      allowTextCommands,
+      directives,
+      defaultActivation,
+      resolvedThinkLevel,
+      resolvedVerboseLevel,
+      resolvedReasoningLevel,
+      resolvedElevatedLevel,
+      execOverrides,
+      elevatedEnabled,
+      elevatedAllowed,
+      blockStreamingEnabled,
+      blockReplyChunking,
+      resolvedBlockStreamingBreak,
+      modelState,
+      provider,
+      model,
+      perMessageQueueMode,
+      perMessageQueueOptions,
+      typing,
+      opts: resolvedOpts,
+      defaultProvider,
+      defaultModel,
+      timeoutMs,
+      isNewSession,
+      resetTriggered,
+      systemSent,
+      sessionEntry,
+      sessionStore,
+      sessionKey,
+      sessionId,
+      storePath,
+      workspaceDir,
+      abortedLastRun,
+    });
+    await persistTraceStep("reply:run_prepared:end", {
+      returnedReply: reply !== undefined,
+      isArray: Array.isArray(reply),
+    });
+    return reply;
+  } catch (err) {
+    await persistTraceStep("reply:run_prepared:error", {
+      error: String(err),
+      provider,
+      model,
+    });
+    throw err;
+  }
 }

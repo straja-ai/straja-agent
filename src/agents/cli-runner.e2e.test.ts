@@ -7,6 +7,9 @@ import { runCliAgent } from "./cli-runner.js";
 import { resolveCliNoOutputTimeoutMs } from "./cli-runner/helpers.js";
 
 const supervisorSpawnMock = vi.fn();
+const persistOrchestrationPromptInputMock = vi.fn();
+const persistOrchestrationPromptOutputMock = vi.fn();
+const persistOrchestrationStepMock = vi.fn();
 
 vi.mock("../process/supervisor/index.js", () => ({
   getProcessSupervisor: () => ({
@@ -16,6 +19,14 @@ vi.mock("../process/supervisor/index.js", () => ({
     reconcileOrphans: vi.fn(),
     getRecord: vi.fn(),
   }),
+}));
+
+vi.mock("../auto-reply/reply/orchestration-vault.js", () => ({
+  persistOrchestrationPromptInput: (...args: unknown[]) =>
+    persistOrchestrationPromptInputMock(...args),
+  persistOrchestrationPromptOutput: (...args: unknown[]) =>
+    persistOrchestrationPromptOutputMock(...args),
+  persistOrchestrationStep: (...args: unknown[]) => persistOrchestrationStepMock(...args),
 }));
 
 type MockRunExit = {
@@ -49,6 +60,12 @@ function createManagedRun(exit: MockRunExit, pid = 1234) {
 describe("runCliAgent with process supervisor", () => {
   beforeEach(() => {
     supervisorSpawnMock.mockReset();
+    persistOrchestrationPromptInputMock.mockReset();
+    persistOrchestrationPromptOutputMock.mockReset();
+    persistOrchestrationStepMock.mockReset();
+    persistOrchestrationPromptInputMock.mockResolvedValue(undefined);
+    persistOrchestrationPromptOutputMock.mockResolvedValue(undefined);
+    persistOrchestrationStepMock.mockResolvedValue(undefined);
   });
 
   it("runs CLI through supervisor and returns payload", async () => {
@@ -93,6 +110,69 @@ describe("runCliAgent with process supervisor", () => {
     expect(input.noOutputTimeoutMs).toBeGreaterThanOrEqual(1_000);
     expect(input.replaceExistingScope).toBe(true);
     expect(input.scopeKey).toContain("thread-123");
+  });
+
+  it("persists orchestration prompt artifacts for traced CLI runs", async () => {
+    supervisorSpawnMock.mockResolvedValueOnce(
+      createManagedRun({
+        reason: "exit",
+        exitCode: 0,
+        exitSignal: null,
+        durationMs: 50,
+        stdout: "ok",
+        stderr: "",
+        timedOut: false,
+        noOutputTimedOut: false,
+      }),
+    );
+
+    await runCliAgent({
+      sessionId: "s-trace",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      prompt: "trace me",
+      provider: "codex-cli",
+      model: "gpt-5.2-codex",
+      timeoutMs: 1_000,
+      runId: "run-trace",
+      orchestrationTraceId: "trace-123",
+      cliSessionId: "thread-123",
+    });
+
+    expect(persistOrchestrationPromptInputMock).toHaveBeenCalledTimes(1);
+    expect(persistOrchestrationPromptInputMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        traceId: "trace-123",
+        runId: "run-trace",
+        sessionId: "s-trace",
+        provider: "codex-cli",
+        model: "gpt-5.2-codex",
+        prompt: "trace me",
+      }),
+    );
+    expect(persistOrchestrationPromptOutputMock).toHaveBeenCalledTimes(1);
+    expect(persistOrchestrationPromptOutputMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        traceId: "trace-123",
+        runId: "run-trace",
+        sessionId: "s-trace",
+        provider: "codex-cli",
+        model: "gpt-5.2-codex",
+        assistantTexts: ["ok"],
+      }),
+    );
+    expect(persistOrchestrationStepMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        traceId: "trace-123",
+        stage: "llm_input",
+      }),
+    );
+    expect(persistOrchestrationStepMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        traceId: "trace-123",
+        stage: "llm_output",
+      }),
+    );
   });
 
   it("fails with timeout when no-output watchdog trips", async () => {

@@ -6,6 +6,7 @@ export const AgentModelSchema = z.union([
     .object({
       primary: z.string().optional(),
       fallbacks: z.array(z.string()).optional(),
+      policy: z.enum(["local_only", "cloud_only", "hybrid"]).optional(),
     })
     .strict(),
 ]);

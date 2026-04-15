@@ -32,6 +32,8 @@ import { registerSubagentRegistryPatch } from "./src/subagent-registry-patch.js"
 import { createVaultTools } from "./src/tools.js";
 
 const DEFAULT_BASE_URL = "http://localhost:8181";
+const INBOUND_FLOW_HOOK_TIMEOUT_MS = 1500;
+const INBOUND_FLOW_TIMEOUT_SENTINEL = Symbol("inbound-flow-timeout");
 
 function normalizeVaultBaseUrl(raw: string | undefined): string {
   const candidate = (raw ?? "").trim() || DEFAULT_BASE_URL;
@@ -563,15 +565,36 @@ const plugin = {
       api.on(
         "before_inbound_dispatch",
         async (event, ctx) => {
+          const startedAt = Date.now();
           try {
-            const flowContext = await buildInboundFlowPromptContext({
-              baseUrl,
-              event,
-              ctx,
-            });
-            if (!flowContext) {
+            const flowContext = await Promise.race([
+              buildInboundFlowPromptContext({
+                baseUrl,
+                event,
+                ctx,
+              }),
+              new Promise<typeof INBOUND_FLOW_TIMEOUT_SENTINEL>((resolve) => {
+                setTimeout(
+                  () => resolve(INBOUND_FLOW_TIMEOUT_SENTINEL),
+                  INBOUND_FLOW_HOOK_TIMEOUT_MS,
+                );
+              }),
+            ]);
+            if (flowContext === INBOUND_FLOW_TIMEOUT_SENTINEL) {
+              api.logger.warn(
+                `inbound flow context timed out after ${INBOUND_FLOW_HOOK_TIMEOUT_MS}ms; continuing without flow injection`,
+              );
               return;
             }
+            if (!flowContext) {
+              api.logger.debug(
+                `inbound flow context: no match (${Date.now() - startedAt}ms) channel=${ctx.channelId}`,
+              );
+              return;
+            }
+            api.logger.debug(
+              `inbound flow context: injected ${flowContext.length} chars in ${Date.now() - startedAt}ms channel=${ctx.channelId}`,
+            );
             return { prependContext: flowContext };
           } catch (err) {
             api.logger.warn(`inbound flow context failed: ${String(err)}`);

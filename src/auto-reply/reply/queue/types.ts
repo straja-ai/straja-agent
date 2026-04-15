@@ -61,6 +61,7 @@ export type FollowupRun = {
     workspaceDir: string;
     config: OpenClawConfig;
     skillsSnapshot?: SkillSnapshot;
+    toolAllowlistOverride?: string[];
     provider: string;
     model: string;
     authProfileId?: string;
@@ -79,6 +80,9 @@ export type FollowupRun = {
     blockReplyBreak: "text_end" | "message_end";
     ownerNumbers?: string[];
     extraSystemPrompt?: string;
+    promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
+    orchestrationTraceId?: string;
+    historyLimitOverride?: number;
     enforceFinalTag?: boolean;
   };
 };

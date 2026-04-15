@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
@@ -17,13 +19,47 @@ import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { formatAbortReplyText, tryFastAbortFromMessage } from "./abort.js";
 import { finalizeInboundContext } from "./inbound-context.js";
 import { shouldSkipDuplicateInbound } from "./inbound-dedupe.js";
+import { buildOrchestrationPacket } from "./orchestration-packet.js";
+import {
+  persistOrchestrationRunSnapshot,
+  persistOrchestrationStep,
+} from "./orchestration-vault.js";
+import {
+  evaluateInboundOrchestration,
+  isInboundOrchestrationEnabled,
+  traceInboundOrchestration,
+  type InboundOrchestrationDecision,
+  type InboundOrchestrationResult,
+} from "./orchestration.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
+import { resolveTypingMode } from "./typing-mode.js";
 
 const AUDIO_PLACEHOLDER_RE = /^<media:audio>(\s*\([^)]*\))?$/i;
 const AUDIO_HEADER_RE = /^\[Audio\b/i;
 
 const normalizeMediaType = (value: string): string => value.split(";")[0]?.trim().toLowerCase();
+
+const resolveInboundTraceBody = (ctx: FinalizedMsgContext, fallback?: string): string => {
+  const candidates = [
+    ctx.BodyForAgent,
+    ctx.BodyForCommands,
+    ctx.CommandBody,
+    ctx.RawBody,
+    ctx.Body,
+    fallback,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+  return "";
+};
 
 const isInboundAudioContext = (ctx: FinalizedMsgContext): boolean => {
   const rawTypes = [
@@ -76,10 +112,17 @@ const resolveSessionTtsAuto = (
   }
 };
 
+function persistTraceAsync(task: Promise<void>, label: string): void {
+  void task.catch((err) => {
+    logVerbose(`dispatch-from-config: ${label} failed: ${String(err)}`);
+  });
+}
+
 export type DispatchFromConfigResult = {
   queuedFinal: boolean;
   counts: Record<ReplyDispatchKind, number>;
   inboundPrependContext?: string;
+  orchestration?: InboundOrchestrationDecision;
 };
 
 export async function dispatchReplyFromConfig(params: {
@@ -154,6 +197,8 @@ export async function dispatchReplyFromConfig(params: {
   const inboundAudio = isInboundAudioContext(ctx);
   const sessionTtsAuto = resolveSessionTtsAuto(ctx, cfg);
   const hookRunner = getGlobalHookRunner();
+  const orchestrationEnabled = isInboundOrchestrationEnabled(cfg);
+  const traceId = crypto.randomUUID();
 
   // Extract message context for hooks (plugin and internal)
   const timestamp =
@@ -172,43 +217,94 @@ export async function dispatchReplyFromConfig(params: {
   const conversationId = ctx.OriginatingTo ?? ctx.To ?? ctx.From ?? undefined;
   const agentId = sessionKey ? resolveSessionAgentId({ sessionKey, config: cfg }) : undefined;
 
-  const inboundDispatchResult =
+  const beforeInboundDispatchTimeoutMs = 4_000;
+  let inboundDispatchResult;
+  if (
     !params.skipBeforeInboundDispatchHooks &&
     !params.prependContextOverride &&
     hookRunner?.hasHooks("before_inbound_dispatch")
-      ? await hookRunner
-          .runBeforeInboundDispatch(
-            {
-              from: ctx.From ?? "",
-              content,
-              timestamp,
-              metadata: {
-                to: ctx.To,
-                provider: ctx.Provider,
-                surface: ctx.Surface,
-                threadId: ctx.MessageThreadId,
-                originatingChannel: ctx.OriginatingChannel,
-                originatingTo: ctx.OriginatingTo,
-                messageId: messageIdForHook,
-                senderId: ctx.SenderId,
-                senderName: ctx.SenderName,
-                senderUsername: ctx.SenderUsername,
-                senderE164: ctx.SenderE164,
-              },
+  ) {
+    const hookStartedAt = Date.now();
+    if (traceId) {
+      await persistOrchestrationStep({
+        traceId,
+        stage: "hooks:before_inbound_dispatch:start",
+        data: {
+          timeoutMs: beforeInboundDispatchTimeoutMs,
+          channelId,
+          sessionKey,
+          messageId: messageIdForHook,
+        },
+      });
+    }
+    try {
+      inboundDispatchResult = await Promise.race([
+        hookRunner.runBeforeInboundDispatch(
+          {
+            from: ctx.From ?? "",
+            content,
+            timestamp,
+            metadata: {
+              to: ctx.To,
+              provider: ctx.Provider,
+              surface: ctx.Surface,
+              threadId: ctx.MessageThreadId,
+              originatingChannel: ctx.OriginatingChannel,
+              originatingTo: ctx.OriginatingTo,
+              messageId: messageIdForHook,
+              senderId: ctx.SenderId,
+              senderName: ctx.SenderName,
+              senderUsername: ctx.SenderUsername,
+              senderE164: ctx.SenderE164,
             },
-            {
-              channelId,
-              accountId: ctx.AccountId,
-              conversationId,
-              sessionKey,
-              agentId,
-            },
-          )
-          .catch((err) => {
-            logVerbose(`dispatch-from-config: before_inbound_dispatch hook failed: ${String(err)}`);
-            return undefined;
-          })
-      : undefined;
+          },
+          {
+            channelId,
+            accountId: ctx.AccountId,
+            conversationId,
+            sessionKey,
+            agentId,
+          },
+        ),
+        new Promise<undefined>((resolve) => {
+          setTimeout(resolve, beforeInboundDispatchTimeoutMs);
+        }),
+      ]);
+      if (traceId) {
+        await persistOrchestrationStep({
+          traceId,
+          stage: "hooks:before_inbound_dispatch:end",
+          data: {
+            durationMs: Date.now() - hookStartedAt,
+            timedOut: inboundDispatchResult === undefined,
+            prependedContext:
+              typeof inboundDispatchResult?.prependContext === "string"
+                ? inboundDispatchResult.prependContext.length
+                : 0,
+            cancelled: inboundDispatchResult?.cancel === true,
+          },
+        });
+      }
+      if (inboundDispatchResult === undefined) {
+        logVerbose(
+          `dispatch-from-config: before_inbound_dispatch hook timed out after ${beforeInboundDispatchTimeoutMs}ms`,
+        );
+      }
+    } catch (err) {
+      if (traceId) {
+        await persistOrchestrationStep({
+          traceId,
+          stage: "hooks:before_inbound_dispatch:error",
+          data: {
+            durationMs: Date.now() - hookStartedAt,
+            error: String(err),
+          },
+        });
+      }
+      logVerbose(`dispatch-from-config: before_inbound_dispatch hook failed: ${String(err)}`);
+      inboundDispatchResult = undefined;
+    }
+  }
   const inboundPrependContext =
     params.prependContextOverride?.trim() || inboundDispatchResult?.prependContext?.trim();
   if (inboundDispatchResult?.cancel) {
@@ -225,6 +321,183 @@ export async function dispatchReplyFromConfig(params: {
       ],
     });
   }
+  const typingModeForDispatch = resolveTypingMode({
+    configured: cfg.session?.typingMode ?? cfg.agents?.defaults?.typingMode,
+    isGroupChat: dispatchCtx.ChatType === "group",
+    wasMentioned: dispatchCtx.WasMentioned === true,
+    isHeartbeat: params.replyOptions?.isHeartbeat === true,
+  });
+  if (orchestrationEnabled && typingModeForDispatch === "instant") {
+    await params.replyOptions?.onReplyStart?.();
+  }
+  const sessionAgentIdForPacket = resolveSessionAgentId({
+    sessionKey: dispatchCtx.SessionKey,
+    config: cfg,
+  });
+  const directModelRef = resolveDefaultModelForAgent({
+    cfg,
+    agentId: sessionAgentIdForPacket,
+  });
+  const orchestrationResult: InboundOrchestrationResult | null = orchestrationEnabled
+    ? await evaluateInboundOrchestration({
+        ctx: dispatchCtx,
+        cfg,
+        traceId,
+      })
+    : traceId
+      ? {
+          decision: {
+            traceId,
+            assignedAgentId: sessionAgentIdForPacket,
+            assignedModel: directModelRef.model,
+            assignedProvider: directModelRef.provider,
+            executionModel: directModelRef.model,
+            executionProvider: directModelRef.provider,
+            taskClass: "general_agent_turn" as const,
+            confidence: 1,
+            suggestedRoute: "default_specialist" as const,
+            finalRoute: "default_specialist" as const,
+            policyChecks: [
+              {
+                rule: "local_routing_enabled",
+                passed: false,
+                detail: "disabled",
+              },
+            ],
+            blockers: ["local_routing_disabled"],
+            reasons: ["Local routing disabled; assigned agent ran directly."],
+            promptNote: "",
+          },
+          routerDecision: {
+            source: "fallback" as const,
+            selectedAgentId: sessionAgentIdForPacket ?? "",
+            selectedAgentReason: "Local routing disabled; using the assigned session agent.",
+            candidates: [],
+            taskClass: "general_agent_turn" as const,
+            suggestedRoute: "default_specialist" as const,
+            confidence: 1,
+            toolFamily: "general" as const,
+            memoryQuery: "",
+            vaultQuery: "",
+            reasons: ["Local routing disabled; assigned agent ran directly."],
+            provider: directModelRef.provider,
+            model: directModelRef.model,
+            rawResponse: "routing-disabled",
+          },
+          replyOptions: {
+            extraSystemPrompt: "",
+          },
+        }
+      : null;
+  const shouldUsePacketizedContext = orchestrationResult
+    ? orchestrationResult.decision.finalRoute === "local_fast_path" ||
+      orchestrationResult.decision.assignedAgentId !== sessionAgentIdForPacket ||
+      orchestrationResult.routerDecision.toolFamily !== "general" ||
+      orchestrationResult.routerDecision.taskClass !== "general_agent_turn" ||
+      (Array.isArray(dispatchCtx.FlowContext) && dispatchCtx.FlowContext.length > 0)
+    : false;
+  const orchestrationPacket =
+    orchestrationResult && shouldUsePacketizedContext
+      ? await buildOrchestrationPacket({
+          cfg,
+          ctx: dispatchCtx,
+          body:
+            [
+              dispatchCtx.BodyForAgent,
+              dispatchCtx.BodyForCommands,
+              dispatchCtx.CommandBody,
+              dispatchCtx.RawBody,
+              dispatchCtx.Body,
+            ]
+              .find((entry) => typeof entry === "string" && entry.trim().length > 0)
+              ?.trim() ?? "",
+          currentAgentId: orchestrationResult.decision.assignedAgentId,
+          localFastPath: orchestrationResult.decision.finalRoute === "local_fast_path",
+          routerDecision: orchestrationResult.routerDecision,
+        })
+      : null;
+  const inboundTraceBody = resolveInboundTraceBody(dispatchCtx, content);
+  if (orchestrationResult) {
+    persistTraceAsync(
+      persistOrchestrationRunSnapshot({
+        traceId: orchestrationResult.decision.traceId,
+        snapshot: {
+          traceId: orchestrationResult.decision.traceId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          sessionKey: dispatchCtx.SessionKey,
+          messageId:
+            dispatchCtx.MessageSidFull ??
+            dispatchCtx.MessageSid ??
+            dispatchCtx.MessageSidFirst ??
+            dispatchCtx.MessageSidLast,
+          assignedAgentId: orchestrationResult.decision.assignedAgentId,
+          assignedProvider: orchestrationResult.decision.assignedProvider,
+          assignedModel: orchestrationResult.decision.assignedModel,
+          executionProvider: orchestrationResult.decision.executionProvider,
+          executionModel: orchestrationResult.decision.executionModel,
+          taskClass: orchestrationResult.decision.taskClass,
+          suggestedRoute: orchestrationResult.decision.suggestedRoute,
+          finalRoute: orchestrationResult.decision.finalRoute,
+          promptModeOverride: orchestrationResult.decision.promptModeOverride,
+          modelOverride: orchestrationResult.replyOptions.modelOverride,
+          confidence: orchestrationResult.decision.confidence,
+          policyChecks: orchestrationResult.decision.policyChecks,
+          blockers: orchestrationResult.decision.blockers,
+          reasons: orchestrationResult.decision.reasons,
+          router: orchestrationResult.routerDecision,
+          packet: orchestrationPacket
+            ? {
+                selectedAgentId: orchestrationPacket.selectedAgentId,
+                selectedAgentReason: orchestrationPacket.selectedAgentReason,
+                agentCandidates: orchestrationPacket.agentCandidates,
+                toolAllowlist: orchestrationPacket.toolAllowlist,
+                memoryResults: orchestrationPacket.memoryResults,
+                vaultResults: orchestrationPacket.vaultResults,
+                packetText: orchestrationPacket.packetText,
+              }
+            : null,
+          inbound: {
+            body: inboundTraceBody,
+            flowContext: Array.isArray(dispatchCtx.FlowContext) ? dispatchCtx.FlowContext : [],
+            hasMedia: Boolean(
+              dispatchCtx.MediaPath ||
+              dispatchCtx.MediaUrl ||
+              (Array.isArray(dispatchCtx.MediaPaths) && dispatchCtx.MediaPaths.length > 0) ||
+              (Array.isArray(dispatchCtx.MediaUrls) && dispatchCtx.MediaUrls.length > 0),
+            ),
+          },
+          inboundText: inboundTraceBody,
+          status: "route_evaluated",
+        },
+      }),
+      "persist run snapshot",
+    );
+    persistTraceAsync(
+      persistOrchestrationStep({
+        traceId: orchestrationResult.decision.traceId,
+        stage: "route:evaluated",
+        data: {
+          decision: orchestrationResult.decision,
+          router: orchestrationResult.routerDecision,
+          replyOptions: orchestrationResult.replyOptions,
+          packet: orchestrationPacket,
+        },
+      }),
+      "persist route evaluated",
+    );
+  }
+  const orchestrationTrace = orchestrationResult
+    ? traceInboundOrchestration({
+        cfg,
+        ctx: dispatchCtx,
+        result: orchestrationResult,
+      })
+    : null;
+  const orchestrationDecision = orchestrationResult?.decision;
+  const orchestrationReplyOptions = orchestrationResult?.replyOptions;
+  const orchestrationTraceId = orchestrationDecision?.traceId;
+  const orchestrationFinalRoute = orchestrationDecision?.finalRoute;
 
   // Trigger plugin hooks (fire-and-forget)
   if (hookRunner?.hasHooks("message_received")) {
@@ -338,7 +611,64 @@ export async function dispatchReplyFromConfig(params: {
   markProcessing();
 
   try {
+    if (orchestrationDecision && orchestrationTraceId) {
+      orchestrationTrace?.record("dispatch:start", {
+        assignedAgentId: orchestrationDecision.assignedAgentId,
+        assignedModel: orchestrationDecision.assignedModel,
+        assignedProvider: orchestrationDecision.assignedProvider,
+        executionModel: orchestrationDecision.executionModel,
+        executionProvider: orchestrationDecision.executionProvider,
+        taskClass: orchestrationDecision.taskClass,
+        suggestedRoute: orchestrationDecision.suggestedRoute,
+        finalRoute: orchestrationDecision.finalRoute,
+        confidence: orchestrationDecision.confidence,
+        reasons: orchestrationDecision.reasons,
+        blockers: orchestrationDecision.blockers,
+      });
+      persistTraceAsync(
+        persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:start",
+          data: {
+            assignedAgentId: orchestrationDecision.assignedAgentId,
+            assignedProvider: orchestrationDecision.assignedProvider,
+            assignedModel: orchestrationDecision.assignedModel,
+            executionProvider: orchestrationDecision.executionProvider,
+            executionModel: orchestrationDecision.executionModel,
+            finalRoute: orchestrationDecision.finalRoute,
+            selectedAgentId: orchestrationPacket?.selectedAgentId,
+            toolAllowlist: orchestrationPacket?.toolAllowlist,
+          },
+        }),
+        "persist dispatch start",
+      );
+      persistTraceAsync(
+        persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:fast_abort_check:start",
+          data: {
+            finalRoute: orchestrationDecision.finalRoute,
+          },
+        }),
+        "persist fast-abort start",
+      );
+    }
     const fastAbort = await tryFastAbortFromMessage({ ctx, cfg });
+    if (orchestrationTraceId) {
+      persistTraceAsync(
+        persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:fast_abort_check:end",
+          data: {
+            finalRoute: orchestrationFinalRoute,
+            handled: fastAbort.handled,
+            aborted: fastAbort.aborted,
+            stoppedSubagents: fastAbort.stoppedSubagents ?? 0,
+          },
+        }),
+        "persist fast-abort end",
+      );
+    }
     if (fastAbort.handled) {
       const payload = {
         text: formatAbortReplyText(fastAbort.stoppedSubagents),
@@ -371,7 +701,50 @@ export async function dispatchReplyFromConfig(params: {
       counts.final += routedFinalCount;
       recordProcessed("completed", { reason: "fast_abort" });
       markIdle("message_completed");
-      return { queuedFinal, counts };
+      if (orchestrationTraceId) {
+        orchestrationTrace?.record("dispatch:end", {
+          finalRoute: orchestrationFinalRoute,
+          note: "fast_abort",
+        });
+        await persistOrchestrationRunSnapshot({
+          traceId: orchestrationTraceId,
+          snapshot: {
+            traceId: orchestrationTraceId,
+            updatedAt: new Date().toISOString(),
+            inbound: {
+              body: inboundTraceBody,
+              flowContext: Array.isArray(dispatchCtx.FlowContext) ? dispatchCtx.FlowContext : [],
+              hasMedia: Boolean(
+                dispatchCtx.MediaPath ||
+                dispatchCtx.MediaUrl ||
+                (Array.isArray(dispatchCtx.MediaPaths) && dispatchCtx.MediaPaths.length > 0) ||
+                (Array.isArray(dispatchCtx.MediaUrls) && dispatchCtx.MediaUrls.length > 0),
+              ),
+            },
+            inboundText: inboundTraceBody,
+            status: "dispatch_completed",
+            finalRoute: orchestrationFinalRoute,
+            outcome: "fast_abort",
+            payload,
+            counts,
+          },
+        });
+        await persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:end",
+          data: {
+            finalRoute: orchestrationFinalRoute,
+            outcome: "fast_abort",
+            payload,
+            counts,
+          },
+        });
+      }
+      return {
+        queuedFinal,
+        counts,
+        orchestration: orchestrationDecision,
+      };
     }
 
     // Track accumulated block text for TTS generation after streaming completes.
@@ -396,10 +769,39 @@ export async function dispatchReplyFromConfig(params: {
       return { ...payload, text: undefined };
     };
 
+    const combinedExtraSystemPrompt = [
+      params.replyOptions?.extraSystemPrompt?.trim(),
+      orchestrationReplyOptions?.extraSystemPrompt,
+      orchestrationPacket?.packetText,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const effectiveReplyOptions: GetReplyOptions = {
+      ...params.replyOptions,
+      extraSystemPrompt: combinedExtraSystemPrompt || undefined,
+      promptModeOverride:
+        params.replyOptions?.promptModeOverride ?? orchestrationReplyOptions?.promptModeOverride,
+      agentIdOverride: params.replyOptions?.agentIdOverride ?? orchestrationPacket?.selectedAgentId,
+      modelOverride: params.replyOptions?.modelOverride ?? orchestrationReplyOptions?.modelOverride,
+      toolAllowlistOverride:
+        params.replyOptions?.toolAllowlistOverride ?? orchestrationPacket?.toolAllowlist,
+      orchestrationTraceId,
+      historyLimitOverride:
+        params.replyOptions?.historyLimitOverride ??
+        orchestrationReplyOptions?.historyLimitOverride,
+      suppressThreadHistory:
+        params.replyOptions?.suppressThreadHistory ??
+        orchestrationReplyOptions?.suppressThreadHistory,
+      suppressUntrustedContext:
+        params.replyOptions?.suppressUntrustedContext ??
+        orchestrationReplyOptions?.suppressUntrustedContext,
+    };
+
     const replyResult = await (params.replyResolver ?? getReplyFromConfig)(
       dispatchCtx,
       {
-        ...params.replyOptions,
+        ...effectiveReplyOptions,
         onToolResult: (payload: ReplyPayload) => {
           const run = async () => {
             const ttsPayload = await maybeApplyTtsToPayload({
@@ -412,12 +814,34 @@ export async function dispatchReplyFromConfig(params: {
             });
             const deliveryPayload = resolveToolDeliveryPayload(ttsPayload);
             if (!deliveryPayload) {
+              if (orchestrationTraceId) {
+                await persistOrchestrationStep({
+                  traceId: orchestrationTraceId,
+                  stage: "dispatch:tool_result_skipped",
+                  data: {
+                    finalRoute: orchestrationFinalRoute,
+                    payload: ttsPayload,
+                    reason: "summary_suppressed_without_media",
+                  },
+                });
+              }
               return;
             }
             if (shouldRouteToOriginating) {
               await sendPayloadAsync(deliveryPayload, undefined, false);
             } else {
               dispatcher.sendToolResult(deliveryPayload);
+            }
+            if (orchestrationTraceId) {
+              await persistOrchestrationStep({
+                traceId: orchestrationTraceId,
+                stage: "dispatch:tool_result",
+                data: {
+                  finalRoute: orchestrationFinalRoute,
+                  routedToOriginating: shouldRouteToOriginating,
+                  payload: deliveryPayload,
+                },
+              });
             }
           };
           return run();
@@ -444,6 +868,17 @@ export async function dispatchReplyFromConfig(params: {
               await sendPayloadAsync(ttsPayload, context?.abortSignal, false);
             } else {
               dispatcher.sendBlockReply(ttsPayload);
+            }
+            if (orchestrationTraceId) {
+              await persistOrchestrationStep({
+                traceId: orchestrationTraceId,
+                stage: "dispatch:block_reply",
+                data: {
+                  finalRoute: orchestrationFinalRoute,
+                  routedToOriginating: shouldRouteToOriginating,
+                  payload: ttsPayload,
+                },
+              });
             }
           };
           return run();
@@ -487,6 +922,17 @@ export async function dispatchReplyFromConfig(params: {
         }
       } else {
         queuedFinal = dispatcher.sendFinalReply(ttsReply) || queuedFinal;
+      }
+      if (orchestrationTraceId) {
+        await persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:final_reply",
+          data: {
+            finalRoute: orchestrationFinalRoute,
+            routedToOriginating: shouldRouteToOriginating,
+            payload: ttsReply,
+          },
+        });
       }
     }
 
@@ -539,6 +985,18 @@ export async function dispatchReplyFromConfig(params: {
             const didQueue = dispatcher.sendFinalReply(ttsOnlyPayload);
             queuedFinal = didQueue || queuedFinal;
           }
+          if (orchestrationTraceId) {
+            await persistOrchestrationStep({
+              traceId: orchestrationTraceId,
+              stage: "dispatch:final_reply",
+              data: {
+                finalRoute: orchestrationFinalRoute,
+                routedToOriginating: shouldRouteToOriginating,
+                payload: ttsOnlyPayload,
+                synthesizedFromBlocks: true,
+              },
+            });
+          }
         }
       } catch (err) {
         logVerbose(
@@ -551,8 +1009,131 @@ export async function dispatchReplyFromConfig(params: {
     counts.final += routedFinalCount;
     recordProcessed("completed");
     markIdle("message_completed");
-    return { queuedFinal, counts, inboundPrependContext };
+    if (orchestrationTraceId) {
+      orchestrationTrace?.record("dispatch:end", {
+        finalRoute: orchestrationFinalRoute,
+        note: replies.length > 0 ? `final_replies:${replies.length}` : "no_final_reply",
+      });
+      await persistOrchestrationRunSnapshot({
+        traceId: orchestrationTraceId,
+        snapshot: {
+          traceId: orchestrationTraceId,
+          updatedAt: new Date().toISOString(),
+          assignedAgentId: orchestrationDecision?.assignedAgentId,
+          assignedProvider: orchestrationDecision?.assignedProvider,
+          assignedModel: orchestrationDecision?.assignedModel,
+          executionProvider: orchestrationDecision?.executionProvider,
+          executionModel: orchestrationDecision?.executionModel,
+          taskClass: orchestrationDecision?.taskClass,
+          suggestedRoute: orchestrationDecision?.suggestedRoute,
+          confidence: orchestrationDecision?.confidence,
+          policyChecks: orchestrationDecision?.policyChecks,
+          blockers: orchestrationDecision?.blockers,
+          reasons: orchestrationDecision?.reasons,
+          router: orchestrationDecision ? orchestrationResult?.routerDecision : undefined,
+          packet: orchestrationPacket
+            ? {
+                selectedAgentId: orchestrationPacket.selectedAgentId,
+                selectedAgentReason: orchestrationPacket.selectedAgentReason,
+                agentCandidates: orchestrationPacket.agentCandidates,
+                toolAllowlist: orchestrationPacket.toolAllowlist,
+                memoryResults: orchestrationPacket.memoryResults,
+                vaultResults: orchestrationPacket.vaultResults,
+                packetText: orchestrationPacket.packetText,
+              }
+            : undefined,
+          inbound: {
+            body: inboundTraceBody,
+            flowContext: Array.isArray(dispatchCtx.FlowContext) ? dispatchCtx.FlowContext : [],
+            hasMedia: Boolean(
+              dispatchCtx.MediaPath ||
+              dispatchCtx.MediaUrl ||
+              (Array.isArray(dispatchCtx.MediaPaths) && dispatchCtx.MediaPaths.length > 0) ||
+              (Array.isArray(dispatchCtx.MediaUrls) && dispatchCtx.MediaUrls.length > 0),
+            ),
+          },
+          inboundText: inboundTraceBody,
+          status: "dispatch_completed",
+          finalRoute: orchestrationFinalRoute,
+          replyResult,
+          counts,
+        },
+      });
+      await persistOrchestrationStep({
+        traceId: orchestrationTraceId,
+        stage: "dispatch:end",
+        data: {
+          finalRoute: orchestrationFinalRoute,
+          replyResult,
+          counts,
+        },
+      });
+    }
+    return {
+      queuedFinal,
+      counts,
+      inboundPrependContext,
+      orchestration: orchestrationDecision,
+    };
   } catch (err) {
+    if (orchestrationTraceId) {
+      orchestrationTrace?.record("dispatch:error", {
+        finalRoute: orchestrationFinalRoute,
+        error: String(err),
+      });
+      await persistOrchestrationRunSnapshot({
+        traceId: orchestrationTraceId,
+        snapshot: {
+          traceId: orchestrationTraceId,
+          updatedAt: new Date().toISOString(),
+          assignedAgentId: orchestrationDecision?.assignedAgentId,
+          assignedProvider: orchestrationDecision?.assignedProvider,
+          assignedModel: orchestrationDecision?.assignedModel,
+          executionProvider: orchestrationDecision?.executionProvider,
+          executionModel: orchestrationDecision?.executionModel,
+          taskClass: orchestrationDecision?.taskClass,
+          suggestedRoute: orchestrationDecision?.suggestedRoute,
+          confidence: orchestrationDecision?.confidence,
+          policyChecks: orchestrationDecision?.policyChecks,
+          blockers: orchestrationDecision?.blockers,
+          reasons: orchestrationDecision?.reasons,
+          router: orchestrationDecision ? orchestrationResult?.routerDecision : undefined,
+          packet: orchestrationPacket
+            ? {
+                selectedAgentId: orchestrationPacket.selectedAgentId,
+                selectedAgentReason: orchestrationPacket.selectedAgentReason,
+                agentCandidates: orchestrationPacket.agentCandidates,
+                toolAllowlist: orchestrationPacket.toolAllowlist,
+                memoryResults: orchestrationPacket.memoryResults,
+                vaultResults: orchestrationPacket.vaultResults,
+                packetText: orchestrationPacket.packetText,
+              }
+            : undefined,
+          inbound: {
+            body: inboundTraceBody,
+            flowContext: Array.isArray(dispatchCtx.FlowContext) ? dispatchCtx.FlowContext : [],
+            hasMedia: Boolean(
+              dispatchCtx.MediaPath ||
+              dispatchCtx.MediaUrl ||
+              (Array.isArray(dispatchCtx.MediaPaths) && dispatchCtx.MediaPaths.length > 0) ||
+              (Array.isArray(dispatchCtx.MediaUrls) && dispatchCtx.MediaUrls.length > 0),
+            ),
+          },
+          inboundText: inboundTraceBody,
+          status: "dispatch_error",
+          finalRoute: orchestrationFinalRoute,
+          error: String(err),
+        },
+      });
+      await persistOrchestrationStep({
+        traceId: orchestrationTraceId,
+        stage: "dispatch:error",
+        data: {
+          finalRoute: orchestrationFinalRoute,
+          error: String(err),
+        },
+      });
+    }
     recordProcessed("error", { error: String(err) });
     markIdle("message_error");
     throw err;

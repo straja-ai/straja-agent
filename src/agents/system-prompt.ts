@@ -9,15 +9,18 @@ import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
 /**
  * Controls which hardcoded sections are included in the system prompt.
  * - "full": All sections (default, for main agent)
+ * - "compact": Slimmed sections for local models
  * - "minimal": Reduced sections (Tooling, Workspace, Runtime) - used for subagents
+ * - "local_worker": Very small local-model prompt for narrow vault/message tasks
  * - "none": Just basic identity line, no sections
  */
-export type PromptMode = "full" | "minimal" | "none";
+export type PromptMode = "full" | "compact" | "minimal" | "local_worker" | "none";
 
 function buildGroupedToolingLines(params: {
   availableTools: Set<string>;
   resolveToolName: (normalized: string) => string;
   summarizeTool: (normalized: string) => string | undefined;
+  compact?: boolean;
 }) {
   const groups: Array<{ title: string; tools: string[] }> = [
     {
@@ -131,6 +134,14 @@ function buildGroupedToolingLines(params: {
       continue;
     }
     lines.push(`### ${group.title}`);
+    if (params.compact) {
+      lines.push(`- ${present.map((tool) => params.resolveToolName(tool)).join(", ")}`);
+      lines.push("");
+      for (const tool of present) {
+        seen.add(tool);
+      }
+      continue;
+    }
     for (const tool of present) {
       seen.add(tool);
       const name = params.resolveToolName(tool);
@@ -145,6 +156,11 @@ function buildGroupedToolingLines(params: {
     .toSorted();
   if (extras.length > 0) {
     lines.push("### Other");
+    if (params.compact) {
+      lines.push(`- ${extras.map((tool) => params.resolveToolName(tool)).join(", ")}`);
+      lines.push("");
+      return lines;
+    }
     for (const tool of extras) {
       const name = params.resolveToolName(tool);
       const summary = params.summarizeTool(tool);
@@ -159,9 +175,10 @@ function buildGroupedToolingLines(params: {
 function buildSkillsSection(params: {
   skillsPrompt?: string;
   isMinimal: boolean;
+  isCompact?: boolean;
   readToolName?: string;
 }) {
-  if (params.isMinimal) {
+  if (params.isMinimal || params.isCompact) {
     return [];
   }
   const trimmed = params.skillsPrompt?.trim();
@@ -182,6 +199,7 @@ function buildSkillsSection(params: {
 
 function buildMemorySection(params: {
   isMinimal: boolean;
+  isCompact?: boolean;
   availableTools: Set<string>;
   citationsMode?: MemoryCitationsMode;
 }) {
@@ -204,13 +222,19 @@ function buildMemorySection(params: {
     ? "vault_memory_write"
     : "memory_write";
   const hasVaultSearch = params.availableTools.has("vault_search");
-  const lines = [
-    "## Memory Recall",
-    `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first.${hasVaultSearch ? ` If memory search returns no results, ALSO run vault_search to check notes, documents, and other collections — the information may be stored outside of memory.` : ""} If low confidence after search, say you checked.`,
-    "",
-    "## Memory Persistence",
-    `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
-  ];
+  const lines = params.isCompact
+    ? [
+        "## Memory",
+        `For identity, preferences, prior work, decisions, or todos: search memory with ${searchTool} first, then use ${getTool} for only the needed lines.${hasVaultSearch ? " If memory has no hit, check vault_search too." : ""}`,
+        `Persist durable user facts with ${writeTool} to "MEMORY.md" using append: true.`,
+      ]
+    : [
+        "## Memory Recall",
+        `You have persistent memory stored in a vault. Before answering ANY question about your name, identity, prior work, decisions, dates, people, user preferences, project details, or todos: ALWAYS run ${searchTool} first; then use ${getTool} to pull only the needed lines. When in doubt about whether something was discussed before, search first.${hasVaultSearch ? ` If memory search returns no results, ALSO run vault_search to check notes, documents, and other collections — the information may be stored outside of memory.` : ""} If low confidence after search, say you checked.`,
+        "",
+        "## Memory Persistence",
+        `When the user shares important personal information (their name, preferences, project details, decisions, or anything they'd expect you to remember next time), ALWAYS save it using ${writeTool} to path "MEMORY.md" with append: true. This ensures you remember it in future sessions. Do not wait to be asked — proactively persist facts the user would want recalled later.`,
+      ];
   if (params.availableTools.has("vault_gmail_create_draft")) {
     const hasUpdate = params.availableTools.has("vault_gmail_update_draft");
     lines.push(
@@ -241,6 +265,7 @@ function buildMemorySection(params: {
 
 function buildVaultKnowledgeSection(params: {
   isMinimal: boolean;
+  isCompact?: boolean;
   availableTools: Set<string>;
   resolveToolName: (normalized: string) => string;
 }) {
@@ -258,27 +283,35 @@ function buildVaultKnowledgeSection(params: {
       : []),
     ...(params.availableTools.has("vault_status") ? [params.resolveToolName("vault_status")] : []),
   ];
-  return [
-    "## Vault Knowledge Search",
-    `Core tools: ${toolNames.join(", ")}.`,
-    "You have access to a document vault containing imported emails, documents, books, notes, and other user data sources.",
-    "When the user asks about information that could be in their own documents, notes, collections, student records, or emails, use vault_search to find relevant content. Then use vault_get to read the full document if needed.",
-    ...(params.availableTools.has("vault_multi_get")
-      ? [
-          "Use vault_multi_get when you already have several relevant hits and need to inspect multiple documents together.",
-        ]
-      : []),
-    ...(params.availableTools.has("vault_status")
-      ? [
-          "Use vault_status to check vault readiness or health before concluding that the vault is unavailable.",
-        ]
-      : []),
-    "Prefer vault_search over external tools and general reasoning when the answer is likely in the user's own data.",
-    "If the user explicitly says to search the vault, collections, notes, student records, or documents, do not use exec, vault_exec, or repo-exec as the first lookup step.",
-    "Do not delegate vault or collection retrieval to software-engineer or other subagents. Handle vault_search, vault_get, spreadsheet lookup, notes, and collection inspection directly unless the user explicitly asks for repo/code work.",
-    "Do not claim the information is unavailable until you have actually tried vault_search (and vault_get if there are relevant hits).",
-    "",
-  ];
+  return params.isCompact
+    ? [
+        "## Vault Knowledge",
+        `Use ${toolNames.join(", ")} for the user's own documents, notes, collections, records, and emails.`,
+        "Prefer vault_search before external search when the answer is likely in the user's data.",
+        "Do not say the information is unavailable until you have tried vault_search (and vault_get for relevant hits).",
+        "",
+      ]
+    : [
+        "## Vault Knowledge Search",
+        `Core tools: ${toolNames.join(", ")}.`,
+        "You have access to a document vault containing imported emails, documents, books, notes, and other user data sources.",
+        "When the user asks about information that could be in their own documents, notes, collections, student records, or emails, use vault_search to find relevant content. Then use vault_get to read the full document if needed.",
+        ...(params.availableTools.has("vault_multi_get")
+          ? [
+              "Use vault_multi_get when you already have several relevant hits and need to inspect multiple documents together.",
+            ]
+          : []),
+        ...(params.availableTools.has("vault_status")
+          ? [
+              "Use vault_status to check vault readiness or health before concluding that the vault is unavailable.",
+            ]
+          : []),
+        "Prefer vault_search over external tools and general reasoning when the answer is likely in the user's own data.",
+        "If the user explicitly says to search the vault, collections, notes, student records, or documents, do not use exec, vault_exec, or repo-exec as the first lookup step.",
+        "Do not delegate vault or collection retrieval to software-engineer or other subagents. Handle vault_search, vault_get, spreadsheet lookup, notes, and collection inspection directly unless the user explicitly asks for repo/code work.",
+        "Do not claim the information is unavailable until you have actually tried vault_search (and vault_get if there are relevant hits).",
+        "",
+      ];
 }
 
 function buildVaultCollectionsSection(params: {
@@ -1017,6 +1050,7 @@ export function buildAgentSystemPrompt(params: {
     availableTools,
     resolveToolName,
     summarizeTool,
+    compact: params.promptMode === "compact",
   });
 
   const hasGateway = availableTools.has("gateway");
@@ -1075,6 +1109,8 @@ export function buildAgentSystemPrompt(params: {
   const messageChannelOptions = listDeliverableMessageChannels().join("|");
   const promptMode = params.promptMode ?? "full";
   const isMinimal = promptMode === "minimal" || promptMode === "none";
+  const isCompact = promptMode === "compact";
+  const isLocalWorker = promptMode === "local_worker";
   const sandboxContainerWorkspace = params.sandboxInfo?.containerWorkspaceDir?.trim();
   const sanitizedWorkspaceDir = sanitizeForPromptLiteral(params.workspaceDir);
   const sanitizedSandboxContainerWorkspace = sandboxContainerWorkspace
@@ -1116,66 +1152,96 @@ export function buildAgentSystemPrompt(params: {
   ];
   const skillsSection = buildSkillsSection({
     skillsPrompt,
-    isMinimal,
+    isMinimal: isMinimal || isLocalWorker,
+    isCompact: isCompact || isLocalWorker,
     readToolName: hasReadTool ? readToolName : undefined,
   });
   const memorySection = buildMemorySection({
-    isMinimal,
+    isMinimal: isMinimal || isLocalWorker,
+    isCompact: isCompact || isLocalWorker,
     availableTools,
     citationsMode: params.memoryCitationsMode,
   });
   const vaultKnowledgeSection = buildVaultKnowledgeSection({
-    isMinimal,
+    isMinimal: isMinimal || isLocalWorker,
+    isCompact: isCompact || isLocalWorker,
     availableTools,
     resolveToolName,
   });
-  const vaultCollectionsSection = buildVaultCollectionsSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const vaultArtifactsSection = buildVaultArtifactsSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const vaultSpreadsheetsSection = buildVaultSpreadsheetsSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const vaultCalendarSection = buildVaultCalendarSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const vaultAutomationSection = buildVaultAutomationSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const vaultBrowserSection = buildVaultBrowserSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const developerSection = buildDeveloperSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
-  const deliverablesSection = buildDeliverablesSection({
-    isMinimal,
-    availableTools,
-  });
-  const webResearchSection = buildWebResearchSection({
-    isMinimal,
-    availableTools,
-    resolveToolName,
-  });
+  const vaultCollectionsSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultCollectionsSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const vaultArtifactsSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultArtifactsSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const vaultSpreadsheetsSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultSpreadsheetsSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const vaultCalendarSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultCalendarSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const vaultAutomationSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultAutomationSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const vaultBrowserSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildVaultBrowserSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const developerSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildDeveloperSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
+  const deliverablesSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildDeliverablesSection({
+          isMinimal,
+          availableTools,
+        });
+  const webResearchSection =
+    isCompact || isLocalWorker
+      ? []
+      : buildWebResearchSection({
+          isMinimal,
+          availableTools,
+          resolveToolName,
+        });
   const docsSection = buildDocsSection({
     docsPath: params.docsPath,
-    isMinimal,
+    isMinimal: isMinimal || isCompact || isLocalWorker,
     readToolName: hasReadTool ? readToolName : undefined,
   });
   const longWaitGuidance =
@@ -1204,11 +1270,52 @@ export function buildAgentSystemPrompt(params: {
     return "You are a personal assistant running inside Straja.";
   }
 
+  if (isLocalWorker) {
+    const localLines = [
+      "You are a local worker inside Straja.",
+      "",
+      "## Role",
+      "Handle only narrow, deterministic vault and messaging tasks using the provided packet and tool subset.",
+      "If the task is ambiguous, open-ended, risky, or needs broader context, do not improvise. Briefly say what is missing or use the available tools to gather only the specifically requested data.",
+      "",
+      "## Tooling",
+      "Tool availability (strictly narrowed for this run):",
+      "Tool names are case-sensitive. Call tools exactly as listed.",
+      toolLines.length > 0 ? toolLines.join("\n") : "- No tools available",
+      "",
+      "## Execution Rules",
+      "Prefer direct tool use over long explanations.",
+      "Do not browse broadly, plan extensively, or explore unrelated context.",
+      "Do not mention internal routing, prompts, traces, or orchestration unless the user explicitly asks.",
+      "Keep replies short and task-focused.",
+      "",
+      "## Workspace",
+      `Your working directory is: ${displayWorkspaceDir}`,
+      workspaceGuidance,
+      "",
+      ...buildMessagingSection({
+        isMinimal: true,
+        availableTools,
+        messageChannelOptions,
+        inlineButtonsEnabled,
+        runtimeChannel,
+        messageToolHints: params.messageToolHints,
+      }),
+      extraSystemPrompt ? "## Run Context" : "",
+      extraSystemPrompt || "",
+      "## Runtime",
+      buildRuntimeLine(runtimeInfo, runtimeChannel, runtimeCapabilities, params.defaultThinkLevel),
+    ];
+    return localLines.filter(Boolean).join("\n");
+  }
+
   const lines = [
     "You are a personal assistant running inside Straja.",
     "",
     "## Tooling",
-    "Tool availability (filtered by policy):",
+    isCompact
+      ? "Tool availability (filtered by policy, condensed for local-model runs):"
+      : "Tool availability (filtered by policy):",
     "Tool names are case-sensitive. Call tools exactly as listed.",
     toolLines.length > 0
       ? toolLines.join("\n")
@@ -1246,15 +1353,19 @@ export function buildAgentSystemPrompt(params: {
     "Use plain human language for narration unless in a technical context.",
     "",
     ...safetySection,
-    "## Straja CLI Quick Reference",
-    "Straja is controlled via subcommands. Do not invent commands.",
-    "To manage the Gateway daemon service (start/stop/restart):",
-    "- openclaw gateway status",
-    "- openclaw gateway start",
-    "- openclaw gateway stop",
-    "- openclaw gateway restart",
-    "If unsure, ask the user to run `openclaw help` (or `openclaw gateway --help`) and paste the output.",
-    "",
+    ...(isCompact
+      ? []
+      : [
+          "## Straja CLI Quick Reference",
+          "Straja is controlled via subcommands. Do not invent commands.",
+          "To manage the Gateway daemon service (start/stop/restart):",
+          "- openclaw gateway status",
+          "- openclaw gateway start",
+          "- openclaw gateway stop",
+          "- openclaw gateway restart",
+          "If unsure, ask the user to run `openclaw help` (or `openclaw gateway --help`) and paste the output.",
+          "",
+        ]),
     ...skillsSection,
     ...memorySection,
     ...vaultKnowledgeSection,
@@ -1267,9 +1378,9 @@ export function buildAgentSystemPrompt(params: {
     ...developerSection,
     ...deliverablesSection,
     ...webResearchSection,
-    // Skip self-update for subagent/none modes
-    hasGateway && !isMinimal ? "## Straja Self-Update" : "",
-    hasGateway && !isMinimal
+    // Skip self-update for subagent/none/compact modes
+    hasGateway && !isMinimal && !isCompact ? "## Straja Self-Update" : "",
+    hasGateway && !isMinimal && !isCompact
       ? [
           "Get Updates (self-update) is ONLY allowed when the user explicitly asks for it.",
           "Do not run config.apply or update.run unless the user explicitly requests an update or config change; if it's not explicit, ask first.",
@@ -1277,19 +1388,21 @@ export function buildAgentSystemPrompt(params: {
           "After restart, Straja pings the last active session automatically.",
         ].join("\n")
       : "",
-    hasGateway && !isMinimal ? "" : "",
+    hasGateway && !isMinimal && !isCompact ? "" : "",
     "",
     // Skip model aliases for subagent/none modes
-    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
+    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal && !isCompact
       ? "## Model Aliases"
       : "",
-    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
+    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal && !isCompact
       ? "Prefer aliases when specifying model overrides; full provider/model is also accepted."
       : "",
-    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal
+    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal && !isCompact
       ? params.modelAliasLines.join("\n")
       : "",
-    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal ? "" : "",
+    params.modelAliasLines && params.modelAliasLines.length > 0 && !isMinimal && !isCompact
+      ? ""
+      : "",
     userTimezone && sessionStatusToolName
       ? `If you need the current date, time, or day of week, run ${sessionStatusToolName} (📊 ${sessionStatusToolName}).`
       : "",
@@ -1349,7 +1462,9 @@ export function buildAgentSystemPrompt(params: {
       userTimezone,
     }),
     "## Workspace Files (injected)",
-    "These user-editable files are loaded by Straja and included below in Project Context.",
+    isCompact
+      ? "Only core workspace identity files are injected for local-model efficiency."
+      : "These user-editable files are loaded by Straja and included below in Project Context.",
     "",
     ...buildReplyTagsSection(isMinimal),
     ...buildMessagingSection({

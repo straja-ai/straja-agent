@@ -28,6 +28,8 @@ type ModelCandidate = {
   model: string;
 };
 
+type ModelRoutingPolicy = "local_only" | "cloud_only" | "hybrid";
+
 type FallbackAttempt = {
   provider: string;
   model: string;
@@ -184,6 +186,7 @@ function resolveFallbackCandidates(params: {
   model: string;
   /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
   fallbacksOverride?: string[];
+  policyOverride?: ModelRoutingPolicy;
 }): ModelCandidate[] {
   const primary = params.cfg
     ? resolveConfiguredModelRef({
@@ -245,7 +248,27 @@ function resolveFallbackCandidates(params: {
     addCandidate({ provider: primary.provider, model: primary.model }, false);
   }
 
-  return candidates;
+  return applyRoutingPolicy(candidates, params.policyOverride);
+}
+
+function isLocalProvider(provider: string): boolean {
+  const normalized = String(provider ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "ollama" || normalized === "vllm";
+}
+
+function applyRoutingPolicy(
+  candidates: ModelCandidate[],
+  policy?: ModelRoutingPolicy,
+): ModelCandidate[] {
+  if (!policy || policy === "hybrid") {
+    return candidates;
+  }
+  if (policy === "local_only") {
+    return candidates[0] && isLocalProvider(candidates[0].provider) ? [candidates[0]] : [];
+  }
+  return candidates[0] && !isLocalProvider(candidates[0].provider) ? [candidates[0]] : [];
 }
 
 const lastProbeAttempt = new Map<string, number>();
@@ -299,6 +322,8 @@ export async function runWithModelFallback<T>(params: {
   agentDir?: string;
   /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
   fallbacksOverride?: string[];
+  /** Optional per-agent routing policy for local/cloud candidates. */
+  policyOverride?: ModelRoutingPolicy;
   run: (provider: string, model: string) => Promise<T>;
   onError?: ModelFallbackErrorHandler;
 }): Promise<ModelFallbackRunResult<T>> {
@@ -307,7 +332,17 @@ export async function runWithModelFallback<T>(params: {
     provider: params.provider,
     model: params.model,
     fallbacksOverride: params.fallbacksOverride,
+    policyOverride: params.policyOverride,
   });
+  if (candidates.length === 0) {
+    const mode =
+      params.policyOverride === "local_only"
+        ? "local-only"
+        : params.policyOverride === "cloud_only"
+          ? "cloud-only"
+          : "policy";
+    throw new Error(`No eligible models remain after applying the agent's ${mode} routing policy.`);
+  }
   const authStore = params.cfg
     ? ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false })
     : null;
