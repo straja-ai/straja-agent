@@ -1,7 +1,12 @@
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(),
+}));
+
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import {
   discoverAllSessions,
@@ -10,6 +15,13 @@ import {
   loadSessionLogs,
   loadSessionUsageTimeSeries,
 } from "./session-cost-usage.js";
+
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete (globalThis as Record<symbol, unknown>)[VAULT_READER_KEY];
+});
 
 describe("session cost usage", () => {
   it("aggregates daily totals with log cost and pricing fallback", async () => {
@@ -145,6 +157,90 @@ describe("session cost usage", () => {
     expect(summary?.totalCost).toBeCloseTo(0.03, 5);
     expect(summary?.totalTokens).toBe(30);
     expect(summary?.lastActivity).toBeGreaterThan(0);
+  });
+
+  it("loads usage from Vault-backed session transcripts", async () => {
+    (globalThis as Record<symbol, unknown>)[VAULT_READER_KEY] = "http://vault.test";
+    const transcript = [
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-04-07T17:14:42.458Z",
+        message: {
+          role: "user",
+          content: "hello",
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-04-07T17:14:51.105Z",
+        message: {
+          role: "assistant",
+          provider: "openai-codex",
+          model: "gpt-5.3-codex",
+          usage: {
+            input: 10,
+            output: 20,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 30,
+            cost: { total: 0.03 },
+          },
+        },
+      }),
+    ].join("\n");
+
+    vi.mocked(execFileSync).mockImplementation((command, args) => {
+      expect(command).toBe("curl");
+      const flatArgs = Array.isArray(args) ? args.map((value) => String(value)) : [];
+      const url = flatArgs[flatArgs.length - 1] ?? "";
+      if (url === "http://vault.test/collections/_sessions/files") {
+        return `${JSON.stringify([
+          {
+            path: "sess-1.jsonl",
+            modifiedAt: "2026-04-07T17:14:51.105Z",
+          },
+        ])}\n200`;
+      }
+      if (url === "http://vault.test/raw/_sessions/sess-1.jsonl") {
+        return `${transcript}\n200`;
+      }
+      return "not found\n404";
+    });
+
+    const config = {
+      models: {
+        providers: {
+          "openai-codex": {
+            models: [{ id: "gpt-5.3-codex" }],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+
+    const summary = await loadCostUsageSummary({
+      startMs: Date.parse("2026-04-01T00:00:00.000Z"),
+      endMs: Date.parse("2026-04-15T23:59:59.999Z"),
+      config,
+    });
+    expect(summary.totals.totalTokens).toBe(30);
+    expect(summary.totals.totalCost).toBeCloseTo(0.03, 5);
+    expect(summary.daily).toHaveLength(1);
+
+    const sessions = await discoverAllSessions({
+      startMs: Date.parse("2026-04-01T00:00:00.000Z"),
+      endMs: Date.parse("2026-04-15T23:59:59.999Z"),
+    });
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.sessionId).toBe("sess-1");
+    expect(sessions[0]?.firstUserMessage).toBe("hello");
+
+    const sessionSummary = await loadSessionCostSummary({
+      sessionFile: "sess-1.jsonl",
+      config,
+    });
+    expect(sessionSummary?.totalTokens).toBe(30);
+    expect(sessionSummary?.messageCounts.assistant).toBe(1);
+    expect(execFileSync).toHaveBeenCalled();
   });
 
   it("captures message counts, tool usage, and model usage", async () => {

@@ -21,6 +21,7 @@ import {
   loadSessionCostSummary,
   loadSessionUsageTimeSeries,
   discoverAllSessions,
+  isVaultSessionStorageConfigured,
   type DiscoveredSession,
 } from "../../infra/session-cost-usage.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
@@ -170,7 +171,23 @@ async function discoverAllSessionsForUsage(params: {
   config: ReturnType<typeof loadConfig>;
   startMs: number;
   endMs: number;
+  storeBySessionId?: Map<string, { key: string; entry: SessionEntry }>;
 }): Promise<DiscoveredSessionWithAgent[]> {
+  if (isVaultSessionStorageConfigured()) {
+    const sessions = await discoverAllSessions({
+      startMs: params.startMs,
+      endMs: params.endMs,
+    });
+    return sessions.map((session) => {
+      const storeMatch = params.storeBySessionId?.get(session.sessionId);
+      const agentId = storeMatch ? parseAgentSessionKey(storeMatch.key)?.agentId : undefined;
+      return {
+        ...session,
+        agentId: agentId ?? "unknown",
+      };
+    });
+  }
+
   const agents = listAgentsForGateway(params.config).agents;
   const results = await Promise.all(
     agents.map(async (agent) => {
@@ -405,18 +422,27 @@ export const usageHandlers: GatewayRequestHandlers = {
           });
         }
       } catch {
-        // File doesn't exist - no results for this key
+        if (isVaultSessionStorageConfigured()) {
+          mergedEntries.push({
+            key: resolvedStoreKey,
+            sessionId,
+            sessionFile,
+            label: storeEntry?.label,
+            updatedAt: storeEntry?.updatedAt ?? Date.now(),
+            storeEntry,
+          });
+        }
       }
     } else {
       // Full discovery for list view
+      // Build a map of sessionId -> store entry for quick lookup
+      const storeBySessionId = buildStoreBySessionId(store);
       const discoveredSessions = await discoverAllSessionsForUsage({
         config,
         startMs,
         endMs,
+        storeBySessionId,
       });
-
-      // Build a map of sessionId -> store entry for quick lookup
-      const storeBySessionId = buildStoreBySessionId(store);
 
       for (const discovered of discoveredSessions) {
         const storeMatch = storeBySessionId.get(discovered.sessionId);
