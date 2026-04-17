@@ -1,5 +1,6 @@
 import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import { normalizeProviderId } from "../model-selection.js";
+import { log } from "./constants.js";
 import {
   ensureAuthProfileStore,
   saveAuthProfileStore,
@@ -92,17 +93,25 @@ export async function markAuthProfileGood(params: {
   agentDir?: string;
 }): Promise<void> {
   const { store, provider, profileId, agentDir } = params;
-  const updated = await updateAuthProfileStoreWithLock({
-    agentDir,
-    updater: (freshStore) => {
-      const profile = freshStore.profiles[profileId];
-      if (!profile || profile.provider !== provider) {
-        return false;
-      }
-      freshStore.lastGood = { ...freshStore.lastGood, [provider]: profileId };
-      return true;
-    },
-  });
+  let updated: AuthProfileStore | null = null;
+  try {
+    updated = await updateAuthProfileStoreWithLock({
+      agentDir,
+      updater: (freshStore) => {
+        const profile = freshStore.profiles[profileId];
+        if (!profile || profile.provider !== provider) {
+          return false;
+        }
+        freshStore.lastGood = { ...freshStore.lastGood, [provider]: profileId };
+        return true;
+      },
+    });
+  } catch (error) {
+    log.warn(
+      `best-effort auth profile bookkeeping lock failed (mark good): ${error instanceof Error ? error.message : String(error)}`,
+      { provider, profileId },
+    );
+  }
   if (updated) {
     store.lastGood = updated.lastGood;
     return;
@@ -112,5 +121,12 @@ export async function markAuthProfileGood(params: {
     return;
   }
   store.lastGood = { ...store.lastGood, [provider]: profileId };
-  saveAuthProfileStore(store, agentDir);
+  try {
+    saveAuthProfileStore(store, agentDir);
+  } catch (error) {
+    log.warn(
+      `best-effort auth profile bookkeeping save failed (mark good): ${error instanceof Error ? error.message : String(error)}`,
+      { provider, profileId },
+    );
+  }
 }

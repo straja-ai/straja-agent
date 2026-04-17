@@ -363,7 +363,12 @@ function resolveRouterSettings(cfg: OpenClawConfig) {
     enabled: orchestration?.enabled !== false && router?.enabled !== false,
     model: router?.model?.trim() || localFastPath?.model?.trim() || "ollama/gemma4:e4b",
     timeoutMs: router?.timeoutMs ?? 60_000,
-    maxTokens: router?.maxTokens ?? 180,
+    maxTokens:
+      typeof router?.maxTokens === "number" &&
+      Number.isFinite(router.maxTokens) &&
+      router.maxTokens > 0
+        ? router.maxTokens
+        : undefined,
   };
 }
 
@@ -760,7 +765,9 @@ export async function runInboundOrchestrationRouter(params: {
               {
                 apiKey,
                 temperature: 0,
-                maxTokens: routerSettings.maxTokens,
+                ...(typeof routerSettings.maxTokens === "number"
+                  ? { maxTokens: routerSettings.maxTokens }
+                  : {}),
                 think: false,
                 signal: AbortSignal.timeout(routerSettings.timeoutMs),
               } as Parameters<ReturnType<typeof createOllamaStreamFn>>[2] & { think?: boolean },
@@ -769,7 +776,9 @@ export async function runInboundOrchestrationRouter(params: {
         : await completeSimple(model, context, {
             apiKey,
             temperature: 0,
-            maxTokens: routerSettings.maxTokens,
+            ...(typeof routerSettings.maxTokens === "number"
+              ? { maxTokens: routerSettings.maxTokens }
+              : {}),
             reasoning: "low",
             signal: AbortSignal.timeout(routerSettings.timeoutMs),
           });

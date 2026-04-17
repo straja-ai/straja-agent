@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../../config/config.js";
 import { normalizeProviderId } from "../model-selection.js";
+import { log } from "./constants.js";
 import { saveAuthProfileStore, updateAuthProfileStoreWithLock } from "./store.js";
 import type { AuthProfileFailureReason, AuthProfileStore, ProfileUsageStats } from "./types.js";
 
@@ -134,25 +135,33 @@ export async function markAuthProfileUsed(params: {
   agentDir?: string;
 }): Promise<void> {
   const { store, profileId, agentDir } = params;
-  const updated = await updateAuthProfileStoreWithLock({
-    agentDir,
-    updater: (freshStore) => {
-      if (!freshStore.profiles[profileId]) {
-        return false;
-      }
-      freshStore.usageStats = freshStore.usageStats ?? {};
-      freshStore.usageStats[profileId] = {
-        ...freshStore.usageStats[profileId],
-        lastUsed: Date.now(),
-        errorCount: 0,
-        cooldownUntil: undefined,
-        disabledUntil: undefined,
-        disabledReason: undefined,
-        failureCounts: undefined,
-      };
-      return true;
-    },
-  });
+  let updated: AuthProfileStore | null = null;
+  try {
+    updated = await updateAuthProfileStoreWithLock({
+      agentDir,
+      updater: (freshStore) => {
+        if (!freshStore.profiles[profileId]) {
+          return false;
+        }
+        freshStore.usageStats = freshStore.usageStats ?? {};
+        freshStore.usageStats[profileId] = {
+          ...freshStore.usageStats[profileId],
+          lastUsed: Date.now(),
+          errorCount: 0,
+          cooldownUntil: undefined,
+          disabledUntil: undefined,
+          disabledReason: undefined,
+          failureCounts: undefined,
+        };
+        return true;
+      },
+    });
+  } catch (error) {
+    log.warn(
+      `best-effort auth profile bookkeeping lock failed (mark used): ${error instanceof Error ? error.message : String(error)}`,
+      { profileId },
+    );
+  }
   if (updated) {
     store.usageStats = updated.usageStats;
     return;
@@ -171,7 +180,14 @@ export async function markAuthProfileUsed(params: {
     disabledReason: undefined,
     failureCounts: undefined,
   };
-  saveAuthProfileStore(store, agentDir);
+  try {
+    saveAuthProfileStore(store, agentDir);
+  } catch (error) {
+    log.warn(
+      `best-effort auth profile bookkeeping save failed (mark used): ${error instanceof Error ? error.message : String(error)}`,
+      { profileId },
+    );
+  }
 }
 
 export function calculateAuthProfileCooldownMs(errorCount: number): number {

@@ -15,6 +15,9 @@ function encodeLines(lines: string[]): ReadableStream<Uint8Array> {
 
 describe("createOllamaStreamFn", () => {
   afterEach(() => {
+    const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+    delete (globalThis as Record<symbol, unknown>)[VAULT_READER_KEY];
+    delete process.env.STRAJA_OLLAMA_BASE_URL;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -91,6 +94,68 @@ describe("createOllamaStreamFn", () => {
       expect.objectContaining({
         think: false,
         messages: [expect.objectContaining({ role: "system", content: "You are helpful." })],
+      }),
+    );
+  });
+
+  it("starts the managed local runtime on demand before inference", async () => {
+    const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+    process.env.STRAJA_OLLAMA_BASE_URL = "http://127.0.0.1:11435";
+    (globalThis as Record<symbol, unknown>)[VAULT_READER_KEY] = "http://vault.test";
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("offline", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ models: [] }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          encodeLines([
+            `${JSON.stringify({
+              model: "gemma4:e4b",
+              created_at: "2026-04-15T00:00:00Z",
+              message: { role: "assistant", content: "Hello" },
+              done: false,
+            })}\n`,
+            `${JSON.stringify({
+              model: "gemma4:e4b",
+              created_at: "2026-04-15T00:00:01Z",
+              message: { role: "assistant", content: "" },
+              done: true,
+              prompt_eval_count: 4,
+              eval_count: 2,
+            })}\n`,
+          ]),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stream = createOllamaStreamFn("http://127.0.0.1:11435")(
+      {
+        id: "gemma4:e4b",
+        api: "ollama",
+        provider: "ollama",
+        contextWindow: 128_000,
+      } as never,
+      {
+        systemPrompt: "You are helpful.",
+        messages: [],
+      },
+      { think: false },
+    );
+
+    await stream.result();
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://127.0.0.1:11435/api/tags",
+      "http://vault.test/connections/agents/ollama/runtime/start",
+      "http://127.0.0.1:11435/api/tags",
+      "http://127.0.0.1:11435/api/chat",
+    ]);
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        method: "POST",
       }),
     );
   });

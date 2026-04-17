@@ -3,6 +3,8 @@ import type { OpenClawConfig } from "../../config/config.js";
 
 const mocks = vi.hoisted(() => ({
   completeSimple: vi.fn(),
+  createOllamaStreamFn: vi.fn(),
+  ollamaInvoke: vi.fn(),
   resolveModel: vi.fn(),
   getApiKeyForModel: vi.fn(),
   requireApiKey: vi.fn((auth: { apiKey?: string }) => auth.apiKey ?? ""),
@@ -18,6 +20,10 @@ vi.mock("@mariozechner/pi-ai", async (importOriginal) => {
     completeSimple: mocks.completeSimple,
   };
 });
+
+vi.mock("../../agents/ollama-stream.js", () => ({
+  createOllamaStreamFn: mocks.createOllamaStreamFn,
+}));
 
 vi.mock("../../agents/pi-embedded-runner/model.js", () => ({
   resolveModel: mocks.resolveModel,
@@ -39,6 +45,8 @@ const { runInboundOrchestrationRouter } = await import("./orchestration-router.j
 describe("orchestration-router", () => {
   beforeEach(() => {
     mocks.completeSimple.mockReset();
+    mocks.createOllamaStreamFn.mockReset();
+    mocks.ollamaInvoke.mockReset();
     mocks.resolveModel.mockReset();
     mocks.getApiKeyForModel.mockReset();
     mocks.requireApiKey.mockClear();
@@ -59,6 +67,29 @@ describe("orchestration-router", () => {
       source: "env: OLLAMA_API_KEY",
       mode: "api-key",
     });
+    mocks.ollamaInvoke.mockResolvedValue({
+      result: async () => ({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              selectedAgentId: "main",
+              taskClass: "general_agent_turn",
+              suggestedRoute: "default_specialist",
+              confidence: 0.5,
+              toolFamily: "general",
+              memoryQuery: "hello",
+              vaultQuery: "hello",
+              reasons: ["general request"],
+            }),
+          },
+        ],
+        usage: { input: 10, output: 10, total: 20 },
+        stopReason: "stop",
+      }),
+    });
+    mocks.createOllamaStreamFn.mockReturnValue(mocks.ollamaInvoke);
   });
 
   it("uses the local router model to select a specialist and task shape", async () => {
@@ -359,5 +390,47 @@ describe("orchestration-router", () => {
     expect(
       (call?.[1] as { messages?: Array<{ content?: string }> })?.messages?.[0]?.content,
     ).not.toContain("You are the orchestration router for Straja.");
+  });
+
+  it("does not send a default maxTokens cap to the ollama router", async () => {
+    mocks.resolveModel.mockReturnValue({
+      model: {
+        provider: "ollama",
+        id: "gemma4:e4b",
+        api: "ollama",
+        baseUrl: "http://127.0.0.1:11435",
+      },
+      authStorage: {},
+      modelRegistry: {},
+    });
+
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            router: {
+              model: "ollama/gemma4:e4b",
+            },
+          },
+        },
+        list: [{ id: "main", default: true, name: "General Assistant" }],
+      },
+    } as OpenClawConfig;
+
+    await runInboundOrchestrationRouter({
+      cfg,
+      traceId: "trace-router-6",
+      sessionId: "telegram:1",
+      body: "hello",
+      currentAgentId: "main",
+      commandAuthorized: true,
+      flowContext: [],
+    });
+
+    const call = mocks.ollamaInvoke.mock.calls.at(-1);
+    expect(call).toBeTruthy();
+    const options = call?.[2] as Record<string, unknown> | undefined;
+    expect(options).toBeTruthy();
+    expect(options).not.toHaveProperty("maxTokens");
   });
 });

@@ -11,8 +11,12 @@ import type {
   Usage,
 } from "@mariozechner/pi-ai";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { withVaultAuthRequestInit } from "../vault-auth.js";
 
 export const OLLAMA_NATIVE_BASE_URL = "http://127.0.0.1:11434";
+const VAULT_READER_KEY = Symbol.for("openclaw.vaultReaderBaseUrl");
+const OLLAMA_WAKE_TIMEOUT_MS = 60_000;
+const ollamaStartupPromises = new Map<string, Promise<void>>();
 
 async function writeDebugOllamaRequest(payload: Record<string, unknown>): Promise<void> {
   const targetPath = process.env.STRAJA_DEBUG_OLLAMA_REQUEST_PATH?.trim();
@@ -85,6 +89,122 @@ interface OllamaChatResponse {
   prompt_eval_duration?: number;
   eval_count?: number;
   eval_duration?: number;
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function getVaultBaseUrl(): string | null {
+  const g = globalThis as Record<symbol, unknown>;
+  const raw = g[VAULT_READER_KEY];
+  if (typeof raw !== "string") {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function isManagedLocalOllamaBaseUrl(baseUrl: string): boolean {
+  const expected = process.env.STRAJA_OLLAMA_BASE_URL?.trim();
+  if (!expected) {
+    return false;
+  }
+  try {
+    const actualUrl = new URL(normalizeBaseUrl(baseUrl));
+    const expectedUrl = new URL(normalizeBaseUrl(expected));
+    const localHosts = new Set(["127.0.0.1", "localhost"]);
+    return (
+      localHosts.has(actualUrl.hostname) &&
+      localHosts.has(expectedUrl.hostname) &&
+      actualUrl.port === expectedUrl.port &&
+      actualUrl.protocol === expectedUrl.protocol
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function probeOllamaHealth(baseUrl: string, timeoutMs = 1_500): Promise<boolean> {
+  try {
+    const response = await fetch(`${normalizeBaseUrl(baseUrl)}/api/tags`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForOllamaHealth(
+  baseUrl: string,
+  timeoutMs = OLLAMA_WAKE_TIMEOUT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await probeOllamaHealth(baseUrl)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error("Managed Ollama did not become healthy in time.");
+}
+
+async function startManagedOllamaRuntime(baseUrl: string): Promise<void> {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const existing = ollamaStartupPromises.get(normalizedBaseUrl);
+  if (existing) {
+    return existing;
+  }
+  const startupPromise = (async () => {
+    if (!isManagedLocalOllamaBaseUrl(normalizedBaseUrl)) {
+      return;
+    }
+    if (await probeOllamaHealth(normalizedBaseUrl)) {
+      return;
+    }
+    const vaultBaseUrl = getVaultBaseUrl();
+    if (!vaultBaseUrl) {
+      return;
+    }
+    const startResponse = await fetch(
+      `${vaultBaseUrl}/connections/agents/ollama/runtime/start`,
+      withVaultAuthRequestInit({
+        method: "POST",
+        signal: AbortSignal.timeout(15_000),
+      }),
+    );
+    if (!startResponse.ok) {
+      let details = "";
+      try {
+        const payload = (await startResponse.json()) as { error?: string };
+        details = payload?.error?.trim() || "";
+      } catch {
+        try {
+          details = (await startResponse.text()).trim();
+        } catch {
+          details = "";
+        }
+      }
+      throw new Error(details || `Failed to start managed Ollama (HTTP ${startResponse.status}).`);
+    }
+    await waitForOllamaHealth(normalizedBaseUrl);
+  })().finally(() => {
+    ollamaStartupPromises.delete(normalizedBaseUrl);
+  });
+  ollamaStartupPromises.set(normalizedBaseUrl, startupPromise);
+  return startupPromise;
 }
 
 // ── Message conversion ──────────────────────────────────────────────────────
@@ -339,6 +459,7 @@ function resolveOllamaChatUrl(baseUrl: string): string {
 
 export function createOllamaStreamFn(baseUrl: string): StreamFn {
   const chatUrl = resolveOllamaChatUrl(baseUrl);
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
 
   return (model, context, options) => {
     const stream = createAssistantMessageEventStream();
@@ -391,6 +512,8 @@ export function createOllamaStreamFn(baseUrl: string): StreamFn {
         if (options?.apiKey) {
           headers.Authorization = `Bearer ${options.apiKey}`;
         }
+
+        await startManagedOllamaRuntime(normalizedBaseUrl);
 
         const response = await fetch(chatUrl, {
           method: "POST",
