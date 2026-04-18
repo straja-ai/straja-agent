@@ -149,7 +149,7 @@ function isLocalProvider(provider: string): boolean {
 
 export function resolveModelFallbackOptions(run: FollowupRun["run"]) {
   const agentId = resolveAgentIdFromSessionKey(run.sessionKey);
-  const policyOverride = resolveAgentModelPolicy(run.config, agentId);
+  const policyOverride = run.modelPolicyOverride ?? resolveAgentModelPolicy(run.config, agentId);
   const normalizedPolicyOverride =
     policyOverride === "local_only" && !isLocalProvider(run.provider) ? "hybrid" : policyOverride;
   return {

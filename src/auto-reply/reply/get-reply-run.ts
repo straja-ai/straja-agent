@@ -464,6 +464,7 @@ export async function runPreparedReply(
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       extraSystemPrompt: extraSystemPrompt || undefined,
       promptModeOverride: opts?.promptModeOverride,
+      modelPolicyOverride: opts?.modelPolicyOverride,
       orchestrationTraceId: opts?.orchestrationTraceId,
       historyLimitOverride: opts?.historyLimitOverride,
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),

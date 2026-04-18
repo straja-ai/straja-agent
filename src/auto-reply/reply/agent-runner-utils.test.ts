@@ -99,6 +99,22 @@ describe("agent-runner-utils", () => {
     expect(resolved.policyOverride).toBe("hybrid");
   });
 
+  it("prefers an explicit runtime model policy override over the agent policy", () => {
+    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
+    hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue([]);
+    hoisted.resolveAgentModelPolicyMock.mockReturnValue("cloud_only");
+    const run = makeRun({
+      provider: "ollama",
+      model: "gemma4:4b",
+      modelPolicyOverride: "hybrid",
+    });
+
+    const resolved = resolveModelFallbackOptions(run);
+
+    expect(hoisted.resolveAgentModelPolicyMock).not.toHaveBeenCalled();
+    expect(resolved.policyOverride).toBe("hybrid");
+  });
+
   it("builds embedded run base params with auth profile and run metadata", () => {
     const run = makeRun({ enforceFinalTag: true });
     const authProfile = resolveProviderScopedAuthProfile({

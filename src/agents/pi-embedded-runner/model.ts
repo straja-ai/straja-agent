@@ -9,6 +9,7 @@ import { buildModelAliasLines } from "../model-alias-lines.js";
 import { normalizeModelCompat } from "../model-compat.js";
 import { resolveForwardCompatModel } from "../model-forward-compat.js";
 import { normalizeProviderId } from "../model-selection.js";
+import { resolveOllamaApiBase } from "../models-config.providers.js";
 import {
   discoverAuthStorage,
   discoverModels,
@@ -21,6 +22,15 @@ type InlineProviderConfig = {
   baseUrl?: string;
   api?: ModelDefinitionConfig["api"];
   models?: ModelDefinitionConfig[];
+};
+
+const OLLAMA_DEFAULT_CONTEXT_TOKENS = 128000;
+const OLLAMA_DEFAULT_MAX_TOKENS = 8192;
+const OLLAMA_DEFAULT_COST = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
 };
 
 export { buildModelAliasLines };
@@ -95,6 +105,23 @@ export function resolveModel(
     });
     if (forwardCompat) {
       return { model: forwardCompat, authStorage, modelRegistry };
+    }
+    if (normalizedProvider === "ollama") {
+      const configuredModel =
+        providerCfg?.models?.find((entry) => entry.id === modelId) ?? providerCfg?.models?.[0];
+      const fallbackModel: Model<Api> = normalizeModelCompat({
+        id: modelId,
+        name: modelId,
+        api: "ollama",
+        provider: "ollama",
+        baseUrl: resolveOllamaApiBase(providerBaseUrl),
+        reasoning: false,
+        input: ["text"],
+        cost: OLLAMA_DEFAULT_COST,
+        contextWindow: configuredModel?.contextWindow ?? OLLAMA_DEFAULT_CONTEXT_TOKENS,
+        maxTokens: configuredModel?.maxTokens ?? OLLAMA_DEFAULT_MAX_TOKENS,
+      } as Model<Api>);
+      return { model: fallbackModel, authStorage, modelRegistry };
     }
     if (providerCfg || modelId.startsWith("mock-")) {
       const fallbackModel: Model<Api> = normalizeModelCompat({

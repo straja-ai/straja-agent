@@ -59,6 +59,8 @@ export type GetReplyOptions = {
   promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
   /** Optional runtime model override for this specific run. */
   modelOverride?: string;
+  /** Optional runtime model policy override for this specific run. */
+  modelPolicyOverride?: "local_only" | "cloud_only" | "hybrid";
   /** Optional runtime agent override for this specific run. */
   agentIdOverride?: string;
   /** Optional narrowed tool allowlist for this specific run. */

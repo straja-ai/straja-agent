@@ -20,6 +20,10 @@ export const BILLING_ERROR_USER_MESSAGE = formatBillingErrorMessage();
 const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try again later.";
 const OVERLOADED_ERROR_USER_MESSAGE =
   "The AI service is temporarily overloaded. Please try again in a moment.";
+const CODEX_REAUTH_ERROR_USER_MESSAGE =
+  "⚠️ OpenAI Codex authentication looks invalid, expired, or blocked. Please re-authenticate Codex and try again.";
+const CODEX_CLOUD_ONLY_UNAVAILABLE_USER_MESSAGE =
+  "⚠️ This cloud-only agent has no healthy OpenAI Codex model available right now. Please re-authenticate Codex and try again.";
 
 function formatRateLimitOrOverloadedErrorCopy(raw: string): string | undefined {
   if (isRateLimitErrorMessage(raw)) {
@@ -28,6 +32,48 @@ function formatRateLimitOrOverloadedErrorCopy(raw: string): string | undefined {
   if (isOverloadedErrorMessage(raw)) {
     return OVERLOADED_ERROR_USER_MESSAGE;
   }
+  return undefined;
+}
+
+function formatAuthRecoveryErrorCopy(
+  raw: string,
+  opts?: { provider?: string; model?: string },
+): string | undefined {
+  const lower = raw.toLowerCase();
+  const provider = opts?.provider?.trim().toLowerCase();
+  const model = opts?.model?.trim().toLowerCase();
+  const looksLikeCodex =
+    provider === "openai-codex" ||
+    model?.includes("codex") ||
+    lower.includes("openai-codex") ||
+    lower.includes("chatgpt.com/backend-api");
+  if (!looksLikeCodex) {
+    return undefined;
+  }
+
+  if (
+    lower.includes("no eligible models remain after applying the agent's cloud-only routing policy")
+  ) {
+    return CODEX_CLOUD_ONLY_UNAVAILABLE_USER_MESSAGE;
+  }
+
+  if (
+    lower.includes("no available auth profile for openai-codex") ||
+    lower.includes("all in cooldown or unavailable") ||
+    lower.includes("oauth token refresh failed") ||
+    lower.includes("token has expired") ||
+    lower.includes("re-authenticate") ||
+    ((lower.includes("403") || lower.includes("forbidden")) &&
+      (lower.includes("<html") ||
+        lower.includes("chatgpt.com") ||
+        lower.includes("backend-api") ||
+        lower.includes("access denied") ||
+        lower.includes("unauthorized") ||
+        lower.includes("authentication")))
+  ) {
+    return CODEX_REAUTH_ERROR_USER_MESSAGE;
+  }
+
   return undefined;
 }
 
@@ -478,6 +524,14 @@ export function formatAssistantErrorText(
   const invalidRequest = raw.match(/"type":"invalid_request_error".*?"message":"([^"]+)"/);
   if (invalidRequest?.[1]) {
     return `LLM request rejected: ${invalidRequest[1]}`;
+  }
+
+  const authRecoveryCopy = formatAuthRecoveryErrorCopy(raw, {
+    provider: opts?.provider,
+    model: opts?.model ?? msg.model,
+  });
+  if (authRecoveryCopy) {
+    return authRecoveryCopy;
   }
 
   const transientCopy = formatRateLimitOrOverloadedErrorCopy(raw);

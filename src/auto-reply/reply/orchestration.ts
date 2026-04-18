@@ -1,11 +1,14 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import { resolveAgentModelPolicy } from "../../agents/agent-scope.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
   buildModelAliasIndex,
   resolveDefaultModelForAgent,
   resolveModelRefFromString,
 } from "../../agents/model-selection.js";
+import { ensureOllamaRuntimeReady } from "../../agents/ollama-stream.js";
+import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
 import { getQueuedFileWriter, type QueuedFileWriter } from "../../agents/queued-file-writer.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
@@ -51,6 +54,7 @@ export type InboundOrchestrationResult = {
     extraSystemPrompt: string;
     promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
     modelOverride?: string;
+    modelPolicyOverride?: "local_only" | "cloud_only" | "hybrid";
     historyLimitOverride?: number;
     suppressThreadHistory?: boolean;
     suppressUntrustedContext?: boolean;
@@ -241,6 +245,44 @@ function resolveLocalFastPathModel(params: {
   return null;
 }
 
+async function ensureLocalFastPathRuntimeReady(params: {
+  cfg: OpenClawConfig;
+  localFastPathModel: { provider: string; model: string } | null;
+}): Promise<{ ready: boolean; detail: string }> {
+  if (!params.localFastPathModel) {
+    return {
+      ready: false,
+      detail: "no local worker model configured",
+    };
+  }
+  if (params.localFastPathModel.provider !== "ollama") {
+    return {
+      ready: true,
+      detail: `execution worker ${params.localFastPathModel.provider}/${params.localFastPathModel.model}`,
+    };
+  }
+  const resolved = resolveModel(
+    params.localFastPathModel.provider,
+    params.localFastPathModel.model,
+    undefined,
+    params.cfg,
+  );
+  const baseUrl =
+    resolved.model &&
+    "baseUrl" in resolved.model &&
+    typeof resolved.model.baseUrl === "string" &&
+    resolved.model.baseUrl.trim()
+      ? resolved.model.baseUrl.trim()
+      : "http://127.0.0.1:11435";
+  const ready = await ensureOllamaRuntimeReady(baseUrl);
+  return {
+    ready,
+    detail: ready
+      ? `execution worker ${params.localFastPathModel.provider}/${params.localFastPathModel.model} ready`
+      : `execution worker ${params.localFastPathModel.provider}/${params.localFastPathModel.model} unavailable`,
+  };
+}
+
 function buildPromptNote(decision: InboundOrchestrationDecision): string {
   const lines = [
     "## Orchestration",
@@ -299,6 +341,7 @@ export async function evaluateInboundOrchestration(params: {
     cfg: params.cfg,
     agentId: assignedAgentId,
   });
+  const assignedPolicy = resolveAgentModelPolicy(params.cfg, assignedAgentId);
   const fastPathSettings = resolveLocalFastPathSettings(params.cfg);
   const localFastPathModel = resolveLocalFastPathModel({
     cfg: params.cfg,
@@ -308,6 +351,17 @@ export async function evaluateInboundOrchestration(params: {
   const maxInputChars = fastPathSettings.maxInputChars;
   const taskClass = routerDecision.taskClass;
   const localRequested = routerDecision.suggestedRoute === "local_fast_path";
+  const localRuntime = localRequested
+    ? await ensureLocalFastPathRuntimeReady({
+        cfg: params.cfg,
+        localFastPathModel,
+      })
+    : {
+        ready: Boolean(localFastPathModel),
+        detail: localFastPathModel
+          ? `execution worker ${localFastPathModel.provider}/${localFastPathModel.model}`
+          : "no local worker model configured",
+      };
 
   const policyChecks: InboundOrchestrationPolicyCheck[] = [
     {
@@ -322,10 +376,8 @@ export async function evaluateInboundOrchestration(params: {
     },
     {
       rule: "local_worker_model_available",
-      passed: Boolean(localFastPathModel),
-      detail: localFastPathModel
-        ? `execution worker ${localFastPathModel.provider}/${localFastPathModel.model}`
-        : "no local worker model configured",
+      passed: localRuntime.ready,
+      detail: localRuntime.detail,
     },
     {
       rule: "flow_context_required",
@@ -417,6 +469,11 @@ export async function evaluateInboundOrchestration(params: {
         localAllowed && localFastPathModel
           ? `${localFastPathModel.provider}/${localFastPathModel.model}`
           : undefined,
+      modelPolicyOverride: localAllowed
+        ? assignedPolicy === "local_only"
+          ? "local_only"
+          : "hybrid"
+        : undefined,
       historyLimitOverride: localAllowed ? 4 : undefined,
       suppressThreadHistory: localAllowed,
       suppressUntrustedContext: localAllowed,

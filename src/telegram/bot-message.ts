@@ -1,4 +1,5 @@
 import type { ReplyToMode } from "../config/config.js";
+import { loadConfig } from "../config/config.js";
 import type { TelegramAccountConfig } from "../config/types.telegram.js";
 import type { RuntimeEnv } from "../runtime.js";
 import {
@@ -44,7 +45,6 @@ type TelegramMessageProcessorDeps = Omit<
 export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDeps) => {
   const {
     bot,
-    cfg,
     account,
     telegramCfg,
     historyLimit,
@@ -70,13 +70,14 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     storeAllowFrom: string[],
     options?: { messageIdOverride?: string; forceWasMentioned?: boolean },
   ) => {
+    const liveCfg = loadConfig();
     const context = await buildTelegramMessageContext({
       primaryCtx,
       allMedia,
       storeAllowFrom,
       options,
       bot,
-      cfg,
+      cfg: liveCfg,
       account,
       historyLimit,
       groupHistories,
@@ -95,7 +96,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     await dispatchTelegramMessage({
       context,
       bot,
-      cfg,
+      cfg: liveCfg,
       runtime,
       replyToMode,
       streamMode,

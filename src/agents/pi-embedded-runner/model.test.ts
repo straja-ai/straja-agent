@@ -397,14 +397,37 @@ describe("resolveModel", () => {
     });
   });
 
-  it("includes auth hint for unknown ollama models (#17328)", () => {
-    // resetMockDiscoverModels() in beforeEach already sets find → null
-    const result = resolveModel("ollama", "gemma3:4b", "/tmp/agent");
+  it("builds an ollama fallback for explicit local models when discovery is unavailable", () => {
+    const result = resolveModel("ollama", "gemma4:e4b", "/tmp/agent");
 
-    expect(result.model).toBeUndefined();
-    expect(result.error).toContain("Unknown model: ollama/gemma3:4b");
-    expect(result.error).toContain("Ollama is registered automatically for local use");
-    expect(result.error).toContain("docs.openclaw.ai/providers/ollama");
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      provider: "ollama",
+      id: "gemma4:e4b",
+      api: "ollama",
+      baseUrl: "http://127.0.0.1:11434",
+      reasoning: false,
+      contextWindow: 128000,
+      maxTokens: 8192,
+    });
+  });
+
+  it("normalizes explicit ollama /v1 base urls when building the local fallback", () => {
+    const cfg = {
+      models: {
+        providers: {
+          ollama: {
+            baseUrl: "http://127.0.0.1:11435/v1",
+            models: [],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("ollama", "gemma4:e4b", "/tmp/agent", cfg);
+
+    expect(result.error).toBeUndefined();
+    expect(result.model?.baseUrl).toBe("http://127.0.0.1:11435");
   });
 
   it("includes auth hint for unknown vllm models", () => {

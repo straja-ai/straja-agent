@@ -7,7 +7,7 @@ import {
 } from "../../agents/agent-scope.js";
 import { getApiKeyForModel, requireApiKey } from "../../agents/model-auth.js";
 import { buildModelAliasIndex, resolveModelRefFromString } from "../../agents/model-selection.js";
-import { createOllamaStreamFn } from "../../agents/ollama-stream.js";
+import { createOllamaStreamFn, ensureOllamaRuntimeReady } from "../../agents/ollama-stream.js";
 import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
 import { normalizeUsage } from "../../agents/usage.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -758,21 +758,28 @@ export async function runInboundOrchestrationRouter(params: {
     };
     const response =
       ollamaModel.api === "ollama"
-        ? await (
-            await createOllamaStreamFn(ollamaModel.baseUrl ?? "http://127.0.0.1:11435")(
-              ollamaModel as Model<Api>,
-              context,
-              {
-                apiKey,
-                temperature: 0,
-                ...(typeof routerSettings.maxTokens === "number"
-                  ? { maxTokens: routerSettings.maxTokens }
-                  : {}),
-                think: false,
-                signal: AbortSignal.timeout(routerSettings.timeoutMs),
-              } as Parameters<ReturnType<typeof createOllamaStreamFn>>[2] & { think?: boolean },
-            )
-          ).result()
+        ? await (() => {
+            const ollamaBaseUrl = ollamaModel.baseUrl ?? "http://127.0.0.1:11435";
+            return (async () => {
+              const ready = await ensureOllamaRuntimeReady(ollamaBaseUrl);
+              if (!ready) {
+                throw new Error(`Managed Ollama unavailable at ${ollamaBaseUrl}`);
+              }
+              return await (
+                await createOllamaStreamFn(ollamaBaseUrl)(ollamaModel as Model<Api>, context, {
+                  apiKey,
+                  temperature: 0,
+                  ...(typeof routerSettings.maxTokens === "number"
+                    ? { maxTokens: routerSettings.maxTokens }
+                    : {}),
+                  think: false,
+                  signal: AbortSignal.timeout(routerSettings.timeoutMs),
+                } as Parameters<ReturnType<typeof createOllamaStreamFn>>[2] & {
+                  think?: boolean;
+                })
+              ).result();
+            })();
+          })()
         : await completeSimple(model, context, {
             apiKey,
             temperature: 0,

@@ -34,6 +34,9 @@ const internalHookMocks = vi.hoisted(() => ({
   createInternalHookEvent: vi.fn(),
   triggerInternalHook: vi.fn(async () => {}),
 }));
+const ollamaMocks = vi.hoisted(() => ({
+  ensureOllamaRuntimeReady: vi.fn(async () => true),
+}));
 
 vi.mock("./route-reply.js", () => ({
   isRoutableChannel: (channel: string | undefined) =>
@@ -67,6 +70,9 @@ vi.mock("../../plugins/hook-runner-global.js", () => ({
 vi.mock("../../hooks/internal-hooks.js", () => ({
   createInternalHookEvent: internalHookMocks.createInternalHookEvent,
   triggerInternalHook: internalHookMocks.triggerInternalHook,
+}));
+vi.mock("../../agents/ollama-stream.js", () => ({
+  ensureOllamaRuntimeReady: ollamaMocks.ensureOllamaRuntimeReady,
 }));
 
 const { dispatchReplyFromConfig } = await import("./dispatch-from-config.js");
@@ -118,6 +124,8 @@ describe("dispatchReplyFromConfig", () => {
     hookMocks.runner.hasHooks.mockReturnValue(false);
     hookMocks.runner.runBeforeInboundDispatch.mockReset();
     hookMocks.runner.runMessageReceived.mockReset();
+    ollamaMocks.ensureOllamaRuntimeReady.mockReset();
+    ollamaMocks.ensureOllamaRuntimeReady.mockResolvedValue(true);
     internalHookMocks.createInternalHookEvent.mockReset();
     internalHookMocks.createInternalHookEvent.mockImplementation(createInternalHookEventPayload);
     internalHookMocks.triggerInternalHook.mockClear();
@@ -262,6 +270,7 @@ describe("dispatchReplyFromConfig", () => {
       async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
         expect(opts?.promptModeOverride).toBe("local_worker");
         expect(opts?.modelOverride).toBe("ollama/gemma4:4b");
+        expect(opts?.modelPolicyOverride).toBe("hybrid");
         expect(opts?.historyLimitOverride).toBe(4);
         expect(opts?.suppressThreadHistory).toBe(true);
         expect(opts?.suppressUntrustedContext).toBe(true);
@@ -308,6 +317,7 @@ describe("dispatchReplyFromConfig", () => {
       async (_ctx: MsgContext, opts?: GetReplyOptions, _cfg?: OpenClawConfig) => {
         expect(opts?.promptModeOverride).toBe("local_worker");
         expect(opts?.modelOverride).toBe("ollama/gemma4:4b");
+        expect(opts?.modelPolicyOverride).toBe("hybrid");
         expect(opts?.historyLimitOverride).toBe(4);
         expect(opts?.suppressThreadHistory).toBe(true);
         expect(opts?.suppressUntrustedContext).toBe(true);
@@ -369,6 +379,149 @@ describe("dispatchReplyFromConfig", () => {
     expect(result.orchestration?.finalRoute).toBe("default_specialist");
     expect(result.orchestration?.blockers).toContain("not_bare_session_reset");
     expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the specialist when the local worker runtime cannot be started", async () => {
+    setNoAbort();
+    ollamaMocks.ensureOllamaRuntimeReady.mockResolvedValue(false);
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.4",
+            policy: "cloud_only",
+          },
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "hi",
+    });
+
+    const replyResolver = vi.fn(async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      expect(opts?.modelOverride).toBeUndefined();
+      expect(opts?.promptModeOverride).toBeUndefined();
+      return { text: "handled by specialist" } satisfies ReplyPayload;
+    });
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(ollamaMocks.ensureOllamaRuntimeReady).toHaveBeenCalled();
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.blockers).toContain("local_worker_model_available");
+    expect(result.orchestration?.executionProvider).toBe("openai-codex");
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on the cloud specialist path when local fast-path execution fails late", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.4",
+          },
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+        list: [
+          {
+            id: "main",
+            default: true,
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              policy: "cloud_only",
+            },
+          },
+        ],
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "hi",
+    });
+
+    const replyResolver = vi.fn(async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      if (opts?.modelOverride === "ollama/gemma4:4b") {
+        throw new Error("Managed Ollama did not become healthy in time.");
+      }
+      expect(opts?.modelOverride).toBeUndefined();
+      expect(opts?.promptModeOverride).toBeUndefined();
+      return { text: "handled by cloud specialist" } satisfies ReplyPayload;
+    });
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(replyResolver).toHaveBeenCalledTimes(2);
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.executionProvider).toBe("openai-codex");
+    expect(result.orchestration?.reasons).toContain(
+      "local fast-path failed; fell back to cloud specialist execution",
+    );
+  });
+
+  it("retries on the cloud specialist path when a local fast-path override is rejected by cloud-only policy", async () => {
+    setNoAbort();
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.4",
+          },
+          orchestration: {
+            enabled: true,
+            localFastPath: {
+              model: "ollama/gemma4:4b",
+            },
+          },
+        },
+        list: [
+          {
+            id: "main",
+            default: true,
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              policy: "cloud_only",
+            },
+          },
+        ],
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Body: "hi",
+    });
+
+    const replyResolver = vi.fn(async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      if (opts?.modelOverride === "ollama/gemma4:4b") {
+        throw new Error(
+          "No eligible models remain after applying the agent's cloud-only routing policy.",
+        );
+      }
+      expect(opts?.modelOverride).toBeUndefined();
+      expect(opts?.promptModeOverride).toBeUndefined();
+      return { text: "handled by cloud specialist" } satisfies ReplyPayload;
+    });
+
+    const result = await dispatchReplyFromConfig({ ctx, cfg, dispatcher, replyResolver });
+
+    expect(replyResolver).toHaveBeenCalledTimes(2);
+    expect(result.orchestration?.finalRoute).toBe("default_specialist");
+    expect(result.orchestration?.executionProvider).toBe("openai-codex");
+    expect(result.orchestration?.reasons).toContain(
+      "local fast-path failed; fell back to cloud specialist execution",
+    );
   });
 
   it("routes regular owner messages to a better-matching specialist agent with a packetized tool subset", async () => {

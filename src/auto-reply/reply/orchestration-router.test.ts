@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "../../config/config.js";
 const mocks = vi.hoisted(() => ({
   completeSimple: vi.fn(),
   createOllamaStreamFn: vi.fn(),
+  ensureOllamaRuntimeReady: vi.fn(async () => true),
   ollamaInvoke: vi.fn(),
   resolveModel: vi.fn(),
   getApiKeyForModel: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock("@mariozechner/pi-ai", async (importOriginal) => {
 
 vi.mock("../../agents/ollama-stream.js", () => ({
   createOllamaStreamFn: mocks.createOllamaStreamFn,
+  ensureOllamaRuntimeReady: mocks.ensureOllamaRuntimeReady,
 }));
 
 vi.mock("../../agents/pi-embedded-runner/model.js", () => ({
@@ -46,6 +48,7 @@ describe("orchestration-router", () => {
   beforeEach(() => {
     mocks.completeSimple.mockReset();
     mocks.createOllamaStreamFn.mockReset();
+    mocks.ensureOllamaRuntimeReady.mockReset();
     mocks.ollamaInvoke.mockReset();
     mocks.resolveModel.mockReset();
     mocks.getApiKeyForModel.mockReset();
@@ -58,6 +61,8 @@ describe("orchestration-router", () => {
       model: {
         provider: "ollama",
         id: "gemma4:4b",
+        api: "ollama",
+        baseUrl: "http://127.0.0.1:11435",
       },
       authStorage: {},
       modelRegistry: {},
@@ -67,6 +72,7 @@ describe("orchestration-router", () => {
       source: "env: OLLAMA_API_KEY",
       mode: "api-key",
     });
+    mocks.ensureOllamaRuntimeReady.mockResolvedValue(true);
     mocks.ollamaInvoke.mockResolvedValue({
       result: async () => ({
         role: "assistant",
@@ -93,23 +99,27 @@ describe("orchestration-router", () => {
   });
 
   it("uses the local router model to select a specialist and task shape", async () => {
-    mocks.completeSimple.mockResolvedValue({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            selectedAgentId: "school",
-            taskClass: "simple_inbound_automation",
-            suggestedRoute: "local_fast_path",
-            confidence: 0.91,
-            toolFamily: "local_automation",
-            memoryQuery: "Maria absence parent",
-            vaultQuery: "Maria attendance absence",
-            reasons: ["parent absence update", "school specialist matches"],
-          }),
-        },
-      ],
-      usage: { input: 120, output: 42, total: 162 },
+    mocks.ollamaInvoke.mockResolvedValue({
+      result: async () => ({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              selectedAgentId: "school",
+              taskClass: "simple_inbound_automation",
+              suggestedRoute: "local_fast_path",
+              confidence: 0.91,
+              toolFamily: "local_automation",
+              memoryQuery: "Maria absence parent",
+              vaultQuery: "Maria attendance absence",
+              reasons: ["parent absence update", "school specialist matches"],
+            }),
+          },
+        ],
+        usage: { input: 120, output: 42, total: 162 },
+        stopReason: "stop",
+      }),
     });
 
     const cfg = {
@@ -149,24 +159,55 @@ describe("orchestration-router", () => {
     expect(mocks.persistPromptOutput).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to a validated agent when the model returns an invalid id", async () => {
-    mocks.completeSimple.mockResolvedValue({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            selectedAgentId: "ghost",
-            taskClass: "general_agent_turn",
-            suggestedRoute: "default_specialist",
-            confidence: 0.7,
-            toolFamily: "general",
-            memoryQuery: "hello",
-            vaultQuery: "hello",
-            reasons: ["generic request"],
-          }),
+  it("wakes the managed ollama runtime before using the local router model", async () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          orchestration: {
+            router: {
+              model: "ollama/gemma4:4b",
+            },
+          },
         },
-      ],
-      usage: { input: 90, output: 28, total: 118 },
+        list: [{ id: "main", default: true, name: "General Assistant" }],
+      },
+    } as OpenClawConfig;
+
+    await runInboundOrchestrationRouter({
+      cfg,
+      traceId: "trace-router-wake",
+      sessionId: "telegram:1",
+      body: "hi",
+      currentAgentId: "main",
+      commandAuthorized: true,
+      flowContext: [],
+    });
+
+    expect(mocks.ensureOllamaRuntimeReady).toHaveBeenCalledWith("http://127.0.0.1:11435");
+  });
+
+  it("falls back to a validated agent when the model returns an invalid id", async () => {
+    mocks.ollamaInvoke.mockResolvedValue({
+      result: async () => ({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              selectedAgentId: "ghost",
+              taskClass: "general_agent_turn",
+              suggestedRoute: "default_specialist",
+              confidence: 0.7,
+              toolFamily: "general",
+              memoryQuery: "hello",
+              vaultQuery: "hello",
+              reasons: ["generic request"],
+            }),
+          },
+        ],
+        usage: { input: 90, output: 28, total: 118 },
+        stopReason: "stop",
+      }),
     });
 
     const cfg = {
@@ -198,25 +239,27 @@ describe("orchestration-router", () => {
   });
 
   it("captures router output from ollama assistant-message shaped responses", async () => {
-    mocks.completeSimple.mockResolvedValue({
-      role: "assistant",
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            selectedAgentId: "main",
-            taskClass: "general_agent_turn",
-            suggestedRoute: "default_specialist",
-            confidence: 0.88,
-            toolFamily: "general",
-            memoryQuery: "hi again",
-            vaultQuery: "hi again",
-            reasons: ["general request"],
-          }),
-        },
-      ],
-      usage: { input: 101, output: 17, total: 118 },
-      stopReason: "end_turn",
+    mocks.ollamaInvoke.mockResolvedValue({
+      result: async () => ({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              selectedAgentId: "main",
+              taskClass: "general_agent_turn",
+              suggestedRoute: "default_specialist",
+              confidence: 0.88,
+              toolFamily: "general",
+              memoryQuery: "hi again",
+              vaultQuery: "hi again",
+              reasons: ["general request"],
+            }),
+          },
+        ],
+        usage: { input: 101, output: 17, total: 118 },
+        stopReason: "end_turn",
+      }),
     });
 
     const cfg = {
@@ -255,23 +298,27 @@ describe("orchestration-router", () => {
   });
 
   it("builds a compact router prompt instead of serializing full routing payloads", async () => {
-    mocks.completeSimple.mockResolvedValue({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            selectedAgentId: "software-engineer",
-            taskClass: "complex_turn",
-            suggestedRoute: "default_specialist",
-            confidence: 0.74,
-            toolFamily: "coding",
-            memoryQuery: "fix build failure",
-            vaultQuery: "build failure",
-            reasons: ["engineering specialist matches"],
-          }),
-        },
-      ],
-      usage: { input: 99, output: 21, total: 120 },
+    mocks.ollamaInvoke.mockResolvedValue({
+      result: async () => ({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              selectedAgentId: "software-engineer",
+              taskClass: "complex_turn",
+              suggestedRoute: "default_specialist",
+              confidence: 0.74,
+              toolFamily: "coding",
+              memoryQuery: "fix build failure",
+              vaultQuery: "build failure",
+              reasons: ["engineering specialist matches"],
+            }),
+          },
+        ],
+        usage: { input: 99, output: 21, total: 120 },
+        stopReason: "stop",
+      }),
     });
 
     const cfg = {

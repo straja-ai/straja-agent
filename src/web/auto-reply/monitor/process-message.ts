@@ -15,7 +15,7 @@ import { dispatchReplyWithBufferedBlockDispatcher } from "../../../auto-reply/re
 import type { ReplyPayload } from "../../../auto-reply/types.js";
 import { toLocationContext } from "../../../channels/location.js";
 import { createReplyPrefixOptions } from "../../../channels/reply-prefix.js";
-import type { loadConfig } from "../../../config/config.js";
+import { loadConfig } from "../../../config/config.js";
 import { resolveMarkdownTableMode } from "../../../config/markdown-tables.js";
 import {
   readSessionUpdatedAt,
@@ -136,11 +136,12 @@ export async function processMessage(params: {
   groupHistory?: GroupHistoryEntry[];
   suppressGroupHistoryClear?: boolean;
 }) {
+  const cfg = loadConfig();
   const conversationId = params.msg.conversationId ?? params.msg.from;
-  const storePath = resolveStorePath(params.cfg.session?.store, {
+  const storePath = resolveStorePath(cfg.session?.store, {
     agentId: params.route.agentId,
   });
-  const envelopeOptions = resolveEnvelopeFormatOptions(params.cfg);
+  const envelopeOptions = resolveEnvelopeFormatOptions(cfg);
   const previousTimestamp = readSessionUpdatedAt({
     storePath,
     sessionKey: params.route.sessionKey,
@@ -195,7 +196,7 @@ export async function processMessage(params: {
 
   // Send ack reaction immediately upon message receipt (post-gating)
   maybeSendAckReaction({
-    cfg: params.cfg,
+    cfg,
     msg: params.msg,
     agentId: params.route.agentId,
     sessionKey: params.route.sessionKey,
@@ -243,22 +244,22 @@ export async function processMessage(params: {
         })()
       : undefined;
 
-  const textLimit = params.maxMediaTextChunkLimit ?? resolveTextChunkLimit(params.cfg, "whatsapp");
-  const chunkMode = resolveChunkMode(params.cfg, "whatsapp", params.route.accountId);
+  const textLimit = params.maxMediaTextChunkLimit ?? resolveTextChunkLimit(cfg, "whatsapp");
+  const chunkMode = resolveChunkMode(cfg, "whatsapp", params.route.accountId);
   const tableMode = resolveMarkdownTableMode({
-    cfg: params.cfg,
+    cfg,
     channel: "whatsapp",
     accountId: params.route.accountId,
   });
-  const mediaLocalRoots = getAgentScopedMediaLocalRoots(params.cfg, params.route.agentId);
+  const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, params.route.agentId);
   let didLogHeartbeatStrip = false;
   let didSendReply = false;
-  const commandAuthorized = shouldComputeCommandAuthorized(params.msg.body, params.cfg)
-    ? await resolveWhatsAppCommandAuthorized({ cfg: params.cfg, msg: params.msg })
+  const commandAuthorized = shouldComputeCommandAuthorized(params.msg.body, cfg)
+    ? await resolveWhatsAppCommandAuthorized({ cfg, msg: params.msg })
     : undefined;
-  const configuredResponsePrefix = params.cfg.messages?.responsePrefix;
+  const configuredResponsePrefix = cfg.messages?.responsePrefix;
   const { onModelSelected, ...prefixOptions } = createReplyPrefixOptions({
-    cfg: params.cfg,
+    cfg,
     agentId: params.route.agentId,
     channel: "whatsapp",
     accountId: params.route.accountId,
@@ -270,7 +271,7 @@ export async function processMessage(params: {
   const responsePrefix =
     prefixOptions.responsePrefix ??
     (configuredResponsePrefix === undefined && isSelfChat
-      ? (resolveIdentityNamePrefix(params.cfg, params.route.agentId) ?? "[openclaw]")
+      ? (resolveIdentityNamePrefix(cfg, params.route.agentId) ?? "[openclaw]")
       : undefined);
 
   const inboundHistory =
@@ -323,7 +324,7 @@ export async function processMessage(params: {
 
   if (dmRouteTarget) {
     updateLastRouteInBackground({
-      cfg: params.cfg,
+      cfg,
       backgroundTasks: params.backgroundTasks,
       storeAgentId: params.route.agentId,
       sessionKey: params.route.mainSessionKey,
@@ -353,7 +354,7 @@ export async function processMessage(params: {
 
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
-    cfg: params.cfg,
+    cfg,
     replyResolver: params.replyResolver,
     dispatcherOptions: {
       ...prefixOptions,
@@ -415,8 +416,8 @@ export async function processMessage(params: {
     },
     replyOptions: {
       disableBlockStreaming:
-        typeof params.cfg.channels?.whatsapp?.blockStreaming === "boolean"
-          ? !params.cfg.channels.whatsapp.blockStreaming
+        typeof cfg.channels?.whatsapp?.blockStreaming === "boolean"
+          ? !cfg.channels.whatsapp.blockStreaming
           : undefined,
       onModelSelected,
     },

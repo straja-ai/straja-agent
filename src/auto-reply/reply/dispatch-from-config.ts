@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveAgentModelPolicy } from "../../agents/agent-scope.js";
 import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadSessionStore, resolveStorePath } from "../../config/sessions.js";
@@ -39,6 +40,37 @@ const AUDIO_PLACEHOLDER_RE = /^<media:audio>(\s*\([^)]*\))?$/i;
 const AUDIO_HEADER_RE = /^\[Audio\b/i;
 
 const normalizeMediaType = (value: string): string => value.split(";")[0]?.trim().toLowerCase();
+
+const isLocalProvider = (provider: string | undefined): boolean => {
+  const normalized = String(provider ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "ollama" || normalized === "vllm";
+};
+
+const isLikelyLocalFastPathError = (err: unknown): boolean => {
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  return [
+    "ollama",
+    "local runtime",
+    "managed ollama",
+    "did not become healthy",
+    "failed to start managed ollama",
+    "fetch failed",
+    "econnrefused",
+    "127.0.0.1:11435",
+    "127.0.0.1:11434",
+  ].some((needle) => normalized.includes(needle));
+};
+
+const isLocalFastPathPolicyMismatchError = (err: unknown): boolean => {
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  return normalized.includes(
+    "no eligible models remain after applying the agent's cloud-only routing policy",
+  );
+};
 
 const resolveInboundTraceBody = (ctx: FinalizedMsgContext, fallback?: string): string => {
   const candidates = [
@@ -495,9 +527,9 @@ export async function dispatchReplyFromConfig(params: {
       })
     : null;
   const orchestrationDecision = orchestrationResult?.decision;
-  const orchestrationReplyOptions = orchestrationResult?.replyOptions;
+  let orchestrationReplyOptions = orchestrationResult?.replyOptions;
   const orchestrationTraceId = orchestrationDecision?.traceId;
-  const orchestrationFinalRoute = orchestrationDecision?.finalRoute;
+  let orchestrationFinalRoute = orchestrationDecision?.finalRoute;
 
   // Trigger plugin hooks (fire-and-forget)
   if (hookRunner?.hasHooks("message_received")) {
@@ -784,6 +816,8 @@ export async function dispatchReplyFromConfig(params: {
         params.replyOptions?.promptModeOverride ?? orchestrationReplyOptions?.promptModeOverride,
       agentIdOverride: params.replyOptions?.agentIdOverride ?? orchestrationPacket?.selectedAgentId,
       modelOverride: params.replyOptions?.modelOverride ?? orchestrationReplyOptions?.modelOverride,
+      modelPolicyOverride:
+        params.replyOptions?.modelPolicyOverride ?? orchestrationReplyOptions?.modelPolicyOverride,
       toolAllowlistOverride:
         params.replyOptions?.toolAllowlistOverride ?? orchestrationPacket?.toolAllowlist,
       orchestrationTraceId,
@@ -798,94 +832,158 @@ export async function dispatchReplyFromConfig(params: {
         orchestrationReplyOptions?.suppressUntrustedContext,
     };
 
-    const replyResult = await (params.replyResolver ?? getReplyFromConfig)(
-      dispatchCtx,
-      {
-        ...effectiveReplyOptions,
-        onToolResult: (payload: ReplyPayload) => {
-          const run = async () => {
-            const ttsPayload = await maybeApplyTtsToPayload({
-              payload,
-              cfg,
-              channel: ttsChannel,
-              kind: "tool",
-              inboundAudio,
-              ttsAuto: sessionTtsAuto,
-            });
-            const deliveryPayload = resolveToolDeliveryPayload(ttsPayload);
-            if (!deliveryPayload) {
+    const invokeReplyResolver = async (options: GetReplyOptions) =>
+      await (params.replyResolver ?? getReplyFromConfig)(
+        dispatchCtx,
+        {
+          ...options,
+          onToolResult: (payload: ReplyPayload) => {
+            const run = async () => {
+              const ttsPayload = await maybeApplyTtsToPayload({
+                payload,
+                cfg,
+                channel: ttsChannel,
+                kind: "tool",
+                inboundAudio,
+                ttsAuto: sessionTtsAuto,
+              });
+              const deliveryPayload = resolveToolDeliveryPayload(ttsPayload);
+              if (!deliveryPayload) {
+                if (orchestrationTraceId) {
+                  await persistOrchestrationStep({
+                    traceId: orchestrationTraceId,
+                    stage: "dispatch:tool_result_skipped",
+                    data: {
+                      finalRoute: orchestrationFinalRoute,
+                      payload: ttsPayload,
+                      reason: "summary_suppressed_without_media",
+                    },
+                  });
+                }
+                return;
+              }
+              if (shouldRouteToOriginating) {
+                await sendPayloadAsync(deliveryPayload, undefined, false);
+              } else {
+                dispatcher.sendToolResult(deliveryPayload);
+              }
               if (orchestrationTraceId) {
                 await persistOrchestrationStep({
                   traceId: orchestrationTraceId,
-                  stage: "dispatch:tool_result_skipped",
+                  stage: "dispatch:tool_result",
                   data: {
                     finalRoute: orchestrationFinalRoute,
-                    payload: ttsPayload,
-                    reason: "summary_suppressed_without_media",
+                    routedToOriginating: shouldRouteToOriginating,
+                    payload: deliveryPayload,
                   },
                 });
               }
-              return;
-            }
-            if (shouldRouteToOriginating) {
-              await sendPayloadAsync(deliveryPayload, undefined, false);
-            } else {
-              dispatcher.sendToolResult(deliveryPayload);
-            }
-            if (orchestrationTraceId) {
-              await persistOrchestrationStep({
-                traceId: orchestrationTraceId,
-                stage: "dispatch:tool_result",
-                data: {
-                  finalRoute: orchestrationFinalRoute,
-                  routedToOriginating: shouldRouteToOriginating,
-                  payload: deliveryPayload,
-                },
-              });
-            }
-          };
-          return run();
-        },
-        onBlockReply: (payload: ReplyPayload, context) => {
-          const run = async () => {
-            // Accumulate block text for TTS generation after streaming
-            if (payload.text) {
-              if (accumulatedBlockText.length > 0) {
-                accumulatedBlockText += "\n";
+            };
+            return run();
+          },
+          onBlockReply: (payload: ReplyPayload, context) => {
+            const run = async () => {
+              if (payload.text) {
+                if (accumulatedBlockText.length > 0) {
+                  accumulatedBlockText += "\n";
+                }
+                accumulatedBlockText += payload.text;
+                blockCount++;
               }
-              accumulatedBlockText += payload.text;
-              blockCount++;
-            }
-            const ttsPayload = await maybeApplyTtsToPayload({
-              payload,
-              cfg,
-              channel: ttsChannel,
-              kind: "block",
-              inboundAudio,
-              ttsAuto: sessionTtsAuto,
-            });
-            if (shouldRouteToOriginating) {
-              await sendPayloadAsync(ttsPayload, context?.abortSignal, false);
-            } else {
-              dispatcher.sendBlockReply(ttsPayload);
-            }
-            if (orchestrationTraceId) {
-              await persistOrchestrationStep({
-                traceId: orchestrationTraceId,
-                stage: "dispatch:block_reply",
-                data: {
-                  finalRoute: orchestrationFinalRoute,
-                  routedToOriginating: shouldRouteToOriginating,
-                  payload: ttsPayload,
-                },
+              const ttsPayload = await maybeApplyTtsToPayload({
+                payload,
+                cfg,
+                channel: ttsChannel,
+                kind: "block",
+                inboundAudio,
+                ttsAuto: sessionTtsAuto,
               });
-            }
-          };
-          return run();
+              if (shouldRouteToOriginating) {
+                await sendPayloadAsync(ttsPayload, context?.abortSignal, false);
+              } else {
+                dispatcher.sendBlockReply(ttsPayload);
+              }
+              if (orchestrationTraceId) {
+                await persistOrchestrationStep({
+                  traceId: orchestrationTraceId,
+                  stage: "dispatch:block_reply",
+                  data: {
+                    finalRoute: orchestrationFinalRoute,
+                    routedToOriginating: shouldRouteToOriginating,
+                    payload: ttsPayload,
+                  },
+                });
+              }
+            };
+            return run();
+          },
         },
-      },
-      cfg,
-    );
+        cfg,
+      );
+
+    let replyResult;
+    try {
+      replyResult = await invokeReplyResolver(effectiveReplyOptions);
+    } catch (err) {
+      const assignedProvider = orchestrationDecision?.assignedProvider;
+      const assignedPolicy = orchestrationDecision?.assignedAgentId
+        ? resolveAgentModelPolicy(cfg, orchestrationDecision.assignedAgentId)
+        : undefined;
+      const cloudSpecialistPreferred =
+        Boolean(assignedProvider) &&
+        !isLocalProvider(assignedProvider) &&
+        (assignedPolicy === "cloud_only" || assignedPolicy === "hybrid");
+      const attemptedLocalModelOverride = isLocalProvider(
+        orchestrationReplyOptions?.modelOverride?.split("/", 1)[0],
+      );
+      const canRetryWithoutLocalFastPath =
+        orchestrationFinalRoute === "local_fast_path" &&
+        cloudSpecialistPreferred &&
+        (isLikelyLocalFastPathError(err) ||
+          (attemptedLocalModelOverride && isLocalFastPathPolicyMismatchError(err)));
+
+      if (!canRetryWithoutLocalFastPath) {
+        throw err;
+      }
+
+      if (orchestrationDecision) {
+        orchestrationDecision.finalRoute = "default_specialist";
+        orchestrationDecision.executionProvider = orchestrationDecision.assignedProvider;
+        orchestrationDecision.executionModel = orchestrationDecision.assignedModel;
+        orchestrationDecision.promptModeOverride = undefined;
+        orchestrationDecision.blockers = [
+          ...new Set([...orchestrationDecision.blockers, "local_worker_model_available"]),
+        ];
+        orchestrationDecision.reasons = [
+          ...orchestrationDecision.reasons,
+          "local fast-path failed; fell back to cloud specialist execution",
+        ];
+      }
+      orchestrationFinalRoute = "default_specialist";
+      if (orchestrationTraceId) {
+        await persistOrchestrationStep({
+          traceId: orchestrationTraceId,
+          stage: "dispatch:local_fast_path_fallback",
+          data: {
+            error: String(err),
+            assignedProvider,
+            assignedModel: orchestrationDecision?.assignedModel,
+            finalRoute: orchestrationFinalRoute,
+          },
+        });
+      }
+
+      const specialistReplyOptions: GetReplyOptions = {
+        ...effectiveReplyOptions,
+        promptModeOverride: params.replyOptions?.promptModeOverride,
+        modelOverride: params.replyOptions?.modelOverride,
+        modelPolicyOverride: params.replyOptions?.modelPolicyOverride,
+        historyLimitOverride: params.replyOptions?.historyLimitOverride,
+        suppressThreadHistory: params.replyOptions?.suppressThreadHistory,
+        suppressUntrustedContext: params.replyOptions?.suppressUntrustedContext,
+      };
+      replyResult = await invokeReplyResolver(specialistReplyOptions);
+    }
 
     const replies = replyResult ? (Array.isArray(replyResult) ? replyResult : [replyResult]) : [];
 

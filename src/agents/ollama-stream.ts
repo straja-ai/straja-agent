@@ -117,16 +117,18 @@ function getVaultBaseUrl(): string | null {
 }
 
 function isManagedLocalOllamaBaseUrl(baseUrl: string): boolean {
+  const localHosts = new Set(["127.0.0.1", "localhost"]);
   const expected = process.env.STRAJA_OLLAMA_BASE_URL?.trim();
-  if (!expected) {
-    return false;
-  }
   try {
     const actualUrl = new URL(normalizeBaseUrl(baseUrl));
+    if (!localHosts.has(actualUrl.hostname)) {
+      return false;
+    }
+    if (!expected) {
+      return true;
+    }
     const expectedUrl = new URL(normalizeBaseUrl(expected));
-    const localHosts = new Set(["127.0.0.1", "localhost"]);
     return (
-      localHosts.has(actualUrl.hostname) &&
       localHosts.has(expectedUrl.hostname) &&
       actualUrl.port === expectedUrl.port &&
       actualUrl.protocol === expectedUrl.protocol
@@ -142,6 +144,22 @@ async function probeOllamaHealth(baseUrl: string, timeoutMs = 1_500): Promise<bo
       signal: AbortSignal.timeout(timeoutMs),
     });
     return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureOllamaRuntimeReady(baseUrl: string): Promise<boolean> {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  if (await probeOllamaHealth(normalizedBaseUrl)) {
+    return true;
+  }
+  if (!isManagedLocalOllamaBaseUrl(normalizedBaseUrl)) {
+    return false;
+  }
+  try {
+    await startManagedOllamaRuntime(normalizedBaseUrl);
+    return true;
   } catch {
     return false;
   }

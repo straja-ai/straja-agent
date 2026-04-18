@@ -81,6 +81,7 @@ export type FollowupRun = {
     ownerNumbers?: string[];
     extraSystemPrompt?: string;
     promptModeOverride?: "full" | "compact" | "minimal" | "local_worker" | "none";
+    modelPolicyOverride?: "local_only" | "cloud_only" | "hybrid";
     orchestrationTraceId?: string;
     historyLimitOverride?: number;
     enforceFinalTag?: boolean;
