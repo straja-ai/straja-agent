@@ -16,8 +16,15 @@ import { addWildcardAllowFrom, mergeAllowFromEntries, promptAccountId } from "./
 const channel = "telegram" as const;
 
 function setTelegramDmPolicy(cfg: OpenClawConfig, dmPolicy: DmPolicy) {
+  const currentAllowFrom = cfg.channels?.telegram?.allowFrom;
   const allowFrom =
-    dmPolicy === "open" ? addWildcardAllowFrom(cfg.channels?.telegram?.allowFrom) : undefined;
+    dmPolicy === "open"
+      ? addWildcardAllowFrom(currentAllowFrom)
+      : Array.isArray(currentAllowFrom)
+        ? currentAllowFrom
+            .map((entry) => String(entry).trim())
+            .filter((entry) => entry && entry !== "*")
+        : undefined;
   return {
     ...cfg,
     channels: {
@@ -25,7 +32,7 @@ function setTelegramDmPolicy(cfg: OpenClawConfig, dmPolicy: DmPolicy) {
       telegram: {
         ...cfg.channels?.telegram,
         dmPolicy,
-        ...(allowFrom ? { allowFrom } : {}),
+        ...(typeof allowFrom !== "undefined" ? { allowFrom } : {}),
       },
     },
   };

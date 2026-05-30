@@ -26,7 +26,7 @@ import { resolveThreadSessionKeys } from "../routing/session-key.js";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import {
   isSenderAllowed,
-  normalizeAllowFromWithStore,
+  normalizeDmAllowFromWithStore,
   type NormalizedAllowFrom,
 } from "./bot-access.js";
 import type { TelegramMediaRef } from "./bot-message-context.js";
@@ -807,11 +807,12 @@ export const registerTelegramHandlers = ({
         effectiveGroupAllow,
         hasGroupAllowOverride,
       } = groupAllowContext;
-      const effectiveDmAllow = normalizeAllowFromWithStore({
+      const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
+      const effectiveDmAllow = normalizeDmAllowFromWithStore({
+        dmPolicy,
         allowFrom: telegramCfg.allowFrom,
         storeAllowFrom,
       });
-      const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
       const senderId = callback.from?.id ? String(callback.from.id) : "";
       const senderUsername = callback.from?.username ?? "";
       if (

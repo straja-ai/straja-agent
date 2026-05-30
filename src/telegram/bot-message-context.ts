@@ -38,6 +38,7 @@ import {
   firstDefined,
   isSenderAllowed,
   normalizeAllowFromWithStore,
+  normalizeDmAllowFromWithStore,
   resolveSenderAllowMatch,
 } from "./bot-access.js";
 import {
@@ -187,7 +188,7 @@ export const buildTelegramMessageContext = async ({
       : null;
   const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
   const mentionRegexes = buildMentionRegexes(cfg, route.agentId);
-  const effectiveDmAllow = normalizeAllowFromWithStore({ allowFrom, storeAllowFrom });
+  const effectiveDmAllow = normalizeDmAllowFromWithStore({ dmPolicy, allowFrom, storeAllowFrom });
   const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
   const effectiveGroupAllow = normalizeAllowFromWithStore({
     allowFrom: groupAllowOverride ?? groupAllowFrom,

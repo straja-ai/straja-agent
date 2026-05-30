@@ -37,6 +37,7 @@ import {
   extractHookToken,
   getHookAgentPolicyError,
   getHookChannelError,
+  type HookInboundEnvelope,
   type HookMessageChannel,
   type HooksConfigResolved,
   isHookAgentAllowed,
@@ -80,6 +81,7 @@ type HookDispatchers = {
     timeoutSeconds?: number;
     allowUnsafeExternalContent?: boolean;
     skipGuardModelChecks?: boolean;
+    inbound?: HookInboundEnvelope;
   }) => string;
 };
 

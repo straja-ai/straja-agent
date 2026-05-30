@@ -7,7 +7,8 @@ import type { CronJob } from "../../cron/types.js";
 import { requestHeartbeatNow } from "../../infra/heartbeat-wake.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import type { createSubsystemLogger } from "../../logging/subsystem.js";
-import type { HookMessageChannel, HooksConfigResolved } from "../hooks.js";
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+import type { HookInboundEnvelope, HookMessageChannel, HooksConfigResolved } from "../hooks.js";
 import { createHooksRequestHandler } from "../server-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -29,6 +30,56 @@ export function createGatewayHooksRequestHandler(params: {
     }
   };
 
+  /**
+   * If the hook carried an `inbound` envelope, run the `before_inbound_dispatch`
+   * hook chain so plugins (flow matcher, memory injector, etc.) can compute
+   * trusted prepend context for this synthetic inbound event. Returns the
+   * computed prepend string, or undefined if no plugin contributed.
+   *
+   * Failures are logged but never propagate — a flow hook misbehaving must not
+   * block the underlying notification turn.
+   */
+  async function computeInboundPrependContext(
+    inbound: HookInboundEnvelope,
+    sessionKey: string,
+  ): Promise<string | undefined> {
+    const hookRunner = getGlobalHookRunner();
+    if (!hookRunner || !hookRunner.hasHooks("before_inbound_dispatch")) {
+      return undefined;
+    }
+    const timeoutMs = 4_000;
+    try {
+      const result = await Promise.race([
+        hookRunner.runBeforeInboundDispatch(
+          {
+            from: inbound.from ?? "",
+            content: inbound.content ?? "",
+            timestamp: Date.now(),
+            metadata: inbound.metadata ?? {},
+          },
+          {
+            channelId: inbound.channel,
+            accountId: undefined,
+            conversationId: undefined,
+            sessionKey,
+            agentId: undefined,
+          },
+        ),
+        new Promise<undefined>((resolve) => setTimeout(resolve, timeoutMs)),
+      ]);
+      const prepend =
+        result && typeof result === "object" && "prependContext" in result
+          ? (result as { prependContext?: unknown }).prependContext
+          : undefined;
+      return typeof prepend === "string" && prepend.trim() ? prepend : undefined;
+    } catch (err) {
+      logHooks.warn(
+        `before_inbound_dispatch failed for inbound ${inbound.channel} hook: ${String(err)}`,
+      );
+      return undefined;
+    }
+  }
+
   const dispatchAgentHook = (value: {
     message: string;
     name: string;
@@ -43,6 +94,7 @@ export function createGatewayHooksRequestHandler(params: {
     timeoutSeconds?: number;
     allowUnsafeExternalContent?: boolean;
     skipGuardModelChecks?: boolean;
+    inbound?: HookInboundEnvelope;
   }) => {
     const sessionKey = value.sessionKey.trim();
     const mainSessionKey = resolveMainSessionKeyFromConfig();
@@ -77,11 +129,31 @@ export function createGatewayHooksRequestHandler(params: {
     void (async () => {
       try {
         const cfg = loadConfig();
+        // Run flow / inbound-dispatch plugins for inbound-shaped hooks so the
+        // user's flows can match on the inbound channel (e.g. "email").
+        let effectiveMessage = value.message;
+        if (value.inbound) {
+          const inbound = value.inbound;
+          logHooks.info(
+            `hook ${value.name}: inbound dispatcher entered (channel=${inbound.channel} from=${inbound.from ?? "?"} content.len=${(inbound.content ?? "").length})`,
+          );
+          const prepend = await computeInboundPrependContext(value.inbound, sessionKey);
+          if (prepend) {
+            effectiveMessage = `${prepend}\n\n${value.message}`;
+            logHooks.info(
+              `hook ${value.name}: prepended ${prepend.length} chars of inbound flow context (channel=${value.inbound.channel})`,
+            );
+          } else {
+            logHooks.info(
+              `hook ${value.name}: no inbound flow context (no plugin returned prepend)`,
+            );
+          }
+        }
         const result = await runCronIsolatedAgentTurn({
           cfg,
           deps,
           job,
-          message: value.message,
+          message: effectiveMessage,
           sessionKey,
           lane: "cron",
         });

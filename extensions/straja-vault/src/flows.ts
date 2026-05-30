@@ -266,6 +266,8 @@ function buildTemplateVars(flow: FlowDoc, event: FlowEvent, ctx: FlowContext) {
     flow_name: flow.name,
     from: event.from,
     content: event.content,
+    // Real flows reference {{message}} in llm_task prompts.
+    message: event.content,
     channel_id: ctx.channelId,
     account_id: ctx.accountId ?? "",
     conversation_id: ctx.conversationId ?? "",
@@ -281,11 +283,16 @@ function buildTemplateVars(flow: FlowDoc, event: FlowEvent, ctx: FlowContext) {
   };
 }
 
-function formatFlowContext(flow: FlowDoc, renderedInstruction: string): string {
+function formatFlowContext(
+  flow: { id: string; name: string },
+  renderedInstruction: string,
+): string {
   return [
     `<flow id="${flow.id}" name="${flow.name}">`,
     "This is trusted operational flow context for the current inbound message.",
-    "Apply it only when the message semantically matches the flow instruction. If it does not match, ignore this flow and continue normally.",
+    "The flow instruction below describes a multi-step workflow with internal classification and branching logic. Walk the workflow step by step — including any classification or if/branch decisions — and only execute action steps that the flow's own logic actually reaches for this specific message.",
+    "When you DO reach an action step that the flow says to perform, execute it directly by calling the appropriate tool (e.g. vault_gmail_create_draft for a reply, the configured channel for an owner notification, a vault_* write tool for a file update). Don't merely describe the action or output a 'suggested' version — do it.",
+    "When the flow's logic does NOT call for any action on this message (e.g. a classification step returns false and the flow reaches its End node), do nothing: don't send notifications, don't draft replies, don't summarize. Reply with a single short line confirming the flow ended without action, then stop.",
     renderedInstruction.trim(),
     "</flow>",
   ].join("\n\n");
@@ -336,6 +343,14 @@ async function loadFlows(baseUrl: string, fetchImpl: typeof fetch): Promise<Flow
   return flowCache;
 }
 
+/**
+ * Build the trusted prepend context for the current inbound event by matching
+ * configured flows in `_flows/` and rendering their instruction text.
+ *
+ * Approach A: the rendered flow text is prepended verbatim to the agent's
+ * cron-turn message; the agent walks the workflow via natural-language
+ * reasoning and tool calls.
+ */
 export async function buildInboundFlowPromptContext(params: {
   baseUrl: string;
   event: FlowEvent;
@@ -353,14 +368,10 @@ export async function buildInboundFlowPromptContext(params: {
   }
   const blocks = matched
     .map((flow) => {
-      const rendered = renderTemplate(
-        flow.instruction,
-        buildTemplateVars(flow, params.event, params.ctx),
-      ).trim();
-      if (!rendered) {
-        return null;
-      }
-      return formatFlowContext(flow, rendered);
+      const templateVars = buildTemplateVars(flow, params.event, params.ctx);
+      const rendered = renderTemplate(flow.instruction, templateVars).trim();
+      if (!rendered) return null;
+      return formatFlowContext({ id: flow.id, name: flow.name }, rendered);
     })
     .filter((entry): entry is string => Boolean(entry));
   if (blocks.length === 0) {

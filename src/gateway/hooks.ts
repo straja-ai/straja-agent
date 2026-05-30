@@ -219,6 +219,20 @@ export function normalizeWakePayload(
   return { ok: true, value: { text, mode } };
 }
 
+/**
+ * Optional "inbound" envelope on a hook payload. When present, the hook is
+ * treated as an inbound message arriving on the named channel — the agent runs
+ * the `before_inbound_dispatch` hook chain on it (so flow matching against
+ * trigger.channels fires) before the dispatch turn. Used today for Gmail-synced
+ * emails (channel: "email") which previously bypassed flow matching entirely.
+ */
+export type HookInboundEnvelope = {
+  channel: string;
+  from?: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type HookAgentPayload = {
   message: string;
   name: string;
@@ -233,6 +247,7 @@ export type HookAgentPayload = {
   timeoutSeconds?: number;
   allowUnsafeExternalContent?: boolean;
   skipGuardModelChecks?: boolean;
+  inbound?: HookInboundEnvelope;
 };
 
 const listHookChannelValues = () => ["last", ...listChannelPlugins().map((plugin) => plugin.id)];
@@ -370,6 +385,39 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
       : undefined;
   const allowUnsafeExternalContent = payload.allowUnsafeExternalContent === true;
   const skipGuardModelChecks = payload.skipGuardModelChecks === true;
+
+  let inbound: HookInboundEnvelope | undefined;
+  const inboundRaw = payload.inbound;
+  if (inboundRaw && typeof inboundRaw === "object" && !Array.isArray(inboundRaw)) {
+    const inboundObj = inboundRaw as Record<string, unknown>;
+    const inboundChannel =
+      typeof inboundObj.channel === "string" && inboundObj.channel.trim()
+        ? inboundObj.channel.trim().toLowerCase()
+        : "";
+    if (inboundChannel) {
+      const inboundFromRaw = inboundObj.from;
+      const inboundContentRaw = inboundObj.content;
+      const inboundMetadataRaw = inboundObj.metadata;
+      inbound = {
+        channel: inboundChannel,
+        from:
+          typeof inboundFromRaw === "string" && inboundFromRaw.trim()
+            ? inboundFromRaw.trim()
+            : undefined,
+        content:
+          typeof inboundContentRaw === "string" && inboundContentRaw.trim()
+            ? inboundContentRaw
+            : undefined,
+        metadata:
+          inboundMetadataRaw &&
+          typeof inboundMetadataRaw === "object" &&
+          !Array.isArray(inboundMetadataRaw)
+            ? (inboundMetadataRaw as Record<string, unknown>)
+            : undefined,
+      };
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -386,6 +434,7 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
       timeoutSeconds,
       allowUnsafeExternalContent,
       skipGuardModelChecks,
+      inbound,
     },
   };
 }

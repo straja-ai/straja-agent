@@ -304,6 +304,42 @@ describe("createTelegramBot", () => {
     expect(pairingText).toContain("openclaw pairing approve telegram PAIRME12");
     expect(pairingText).not.toContain("<code>");
   });
+
+  it("does not treat stale wildcard allowFrom as open access when dmPolicy is pairing", async () => {
+    onSpy.mockReset();
+    sendMessageSpy.mockReset();
+    replySpy.mockReset();
+
+    loadConfig.mockReturnValue({
+      channels: { telegram: { dmPolicy: "pairing", allowFrom: ["*"] } },
+    });
+    readChannelAllowFromStore.mockResolvedValue([]);
+    upsertChannelPairingRequest.mockResolvedValue({
+      code: "PAIRME12",
+      created: true,
+    });
+
+    createTelegramBot({ token: "tok" });
+    const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+
+    await handler({
+      message: {
+        chat: { id: 1234, type: "private" },
+        text: "hello",
+        date: 1736380800,
+        from: { id: 999, username: "random" },
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+
+    expect(replySpy).not.toHaveBeenCalled();
+    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+    const pairingText = String(sendMessageSpy.mock.calls[0]?.[1]);
+    expect(pairingText).toContain("Pairing code:");
+    expect(pairingText).toContain("PAIRME12");
+  });
+
   it("does not resend pairing code when a request is already pending", async () => {
     onSpy.mockReset();
     sendMessageSpy.mockReset();
